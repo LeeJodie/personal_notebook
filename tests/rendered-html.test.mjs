@@ -26,3 +26,16 @@ test("OpenAPI contract includes ingestion, progress, TTS and knowledge search", 
   assert.match(api, /\/v1\/tts\/sessions:/);
   assert.match(api, /\/v1\/knowledge\/search:/);
 });
+
+test("URL imports use the crawl API and dynamic reader data", async () => {
+  const [page, worker, crawler] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("worker/index.ts", root), "utf8"),
+    readFile(new URL("worker/crawl.ts", root), "utf8"),
+  ]);
+  assert.match(page, /fetch\("\/api\/crawl"/);
+  assert.match(page, /readerDocument\.sections\.map/);
+  assert.match(page, /未生成任何替代内容/);
+  assert.match(worker, /handleCrawlRequest/);
+  assert.match(crawler, /extractDocumentFromHtml/);
+});

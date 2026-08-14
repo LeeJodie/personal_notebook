@@ -5,7 +5,7 @@
 - 产品与架构方案：[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md)
 - 前后端联调契约：[`public/openapi.yaml`](public/openapi.yaml)
 
-原型中的文件选择、格式校验、浏览器 TTS、音色选择、单 HTML 导出和原文件回下载可直接体验。内容解析、后台任务和知识索引为模拟数据，用于前后端并行开发。
+原型中的 URL 导入已连接真实服务端抓取，抓取结果会贯穿 Reader、浏览器 TTS 和单 HTML 导出；抓取失败会明确报错，不会使用内置示例冒充网页内容。生产用 Crawl4AI 0.9.2 容器位于 [`services/crawler`](services/crawler)，体验站在尚未绑定容器时使用 Worker 正文提取器。Office/PDF 解析与知识库持久化尚待接入。
 
 ---
 

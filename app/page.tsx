@@ -5,9 +5,35 @@ import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
 type View = "create" | "processing" | "reader" | "library" | "api";
 type SourceType = "file" | "url";
 
+interface ReaderSection {
+  id: string;
+  eyebrow: string;
+  title: string;
+  paragraphs: string[];
+}
+
+interface ReaderDocument {
+  title: string;
+  description: string;
+  sourceUrl: string;
+  siteName: string;
+  fetchedAt: string;
+  wordCount: number;
+  engine: "demo" | "crawl4ai" | "server-html-extractor";
+  sections: ReaderSection[];
+}
+
 const supportedExtensions = ["DOCX", "DOC", "MD", "XLSX", "XLS", "PPTX", "PPT", "PDF"];
 
-const sampleSections = [
+const demoDocument: ReaderDocument = {
+  title: "智能阅读项目建设方案",
+  description: "从内容导入、结构化处理到语音阅读与私有知识库，构建一套稳定、可扩展的企业级内容阅读平台。",
+  sourceUrl: "",
+  siteName: "声阅阅读示例",
+  fetchedAt: "2026-08-14T00:00:00.000Z",
+  wordCount: 628,
+  engine: "demo",
+  sections: [
   {
     id: "overview",
     eyebrow: "01 / 项目概述",
@@ -35,7 +61,8 @@ const sampleSections = [
       "对象存储使用租户级路径与短时签名链接，向量库使用强制 metadata filter。删除一份资料时，原文件、H5、分块、向量与音频缓存会被同步清理。",
     ],
   },
-];
+  ],
+};
 
 const libraryItems = [
   { name: "2026 年产品战略与路线图", type: "PPTX", size: "18.6 MB", chunks: 126, time: "8 分钟前", color: "coral" },
@@ -60,6 +87,12 @@ function AppIcon({ name }: { name: "plus" | "book" | "clock" | "code" | "arrow" 
   return <span className={`app-icon icon-${name}`} aria-hidden="true">{map[name]}</span>;
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character] || character);
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("create");
   const [sourceType, setSourceType] = useState<SourceType>("file");
@@ -74,12 +107,15 @@ export default function Home() {
   const [speaking, setSpeaking] = useState(false);
   const [speechProgress, setSpeechProgress] = useState(0);
   const [notice, setNotice] = useState("");
+  const [readerDocument, setReaderDocument] = useState<ReaderDocument>(demoDocument);
+  const [isCrawling, setIsCrawling] = useState(false);
+  const [processingError, setProcessingError] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   const articleText = useMemo(
-    () => sampleSections.flatMap((section) => [section.title, ...section.paragraphs]).join("。"),
-    [],
+    () => [readerDocument.title, readerDocument.description, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])].join("。"),
+    [readerDocument],
   );
 
   useEffect(() => {
@@ -96,37 +132,63 @@ export default function Home() {
   }, [voiceName]);
 
   useEffect(() => {
-    if (view !== "processing") return;
+    if (view !== "processing" || sourceType !== "url" || !isCrawling) return;
     const timer = window.setInterval(() => {
       setProgress((current) => {
-        const next = Math.min(current + (current < 55 ? 9 : current < 85 ? 4 : 2), 100);
-        if (next === 100) {
-          window.clearInterval(timer);
-          window.setTimeout(() => setView("reader"), 450);
-        }
-        return next;
+        return Math.min(current + (current < 55 ? 7 : current < 78 ? 3 : 1), 88);
       });
-    }, 320);
+    }, 420);
     return () => window.clearInterval(timer);
-  }, [view]);
+  }, [view, sourceType, isCrawling]);
 
   useEffect(() => () => window.speechSynthesis?.cancel(), []);
 
   const startProcessing = (name: string) => {
-    setProcessingName(name);
-    setProgress(6);
-    setView("processing");
-    setNotice("");
+    setNotice(`已选择「${name}」。当前体验站尚未连接 Office/PDF 解析服务，不会使用示例正文冒充文件内容。`);
   };
 
-  const submitUrl = () => {
+  const submitUrl = async () => {
+    if (isCrawling) return;
+    let parsed: URL;
     try {
-      const parsed = new URL(url);
+      const candidate = /^https?:\/\//i.test(url.trim()) ? url.trim() : `https://${url.trim()}`;
+      parsed = new URL(candidate);
       if (!/^https?:$/.test(parsed.protocol)) throw new Error("invalid");
+      setUrl(parsed.toString());
       setUrlError("");
-      startProcessing(parsed.hostname);
     } catch {
-      setUrlError("请输入完整的 http:// 或 https:// 链接");
+      setUrlError("请输入有效的网页地址，例如 www.beijing.gov.cn");
+      return;
+    }
+
+    setSourceType("url");
+    setProcessingName(parsed.hostname);
+    setProgress(8);
+    setProcessingError("");
+    setNotice("");
+    setIsCrawling(true);
+    setView("processing");
+    try {
+      const response = await fetch("/api/crawl", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: parsed.toString() }),
+      });
+      const result = await response.json() as Partial<ReaderDocument> & { message?: string };
+      if (!response.ok) throw new Error(result.message || `抓取服务返回 ${response.status}`);
+      if (!result.title || !result.description || !Array.isArray(result.sections) || result.sections.length === 0) {
+        throw new Error("抓取成功，但结果中没有可阅读正文。");
+      }
+      const document = result as ReaderDocument;
+      setReaderDocument(document);
+      setProcessingName(document.title);
+      setProgress(100);
+      window.setTimeout(() => setView("reader"), 450);
+    } catch (error) {
+      setProcessingError(error instanceof Error ? error.message : "网页抓取失败。");
+      setProgress((current) => Math.min(current, 88));
+    } finally {
+      setIsCrawling(false);
     }
   };
 
@@ -171,6 +233,10 @@ export default function Home() {
   };
 
   const downloadOriginal = () => {
+    if (sourceType === "url" && readerDocument.sourceUrl) {
+      window.open(readerDocument.sourceUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
     if (!selectedFile) {
       setNotice("示例文档没有原始文件；上传你的文件后即可下载原件。");
       return;
@@ -184,13 +250,13 @@ export default function Home() {
   };
 
   const exportH5 = () => {
-    const sections = sampleSections.map((section) => `<section><p class="eyebrow">${section.eyebrow}</p><h2>${section.title}</h2>${section.paragraphs.map((p) => `<p>${p}</p>`).join("")}</section>`).join("");
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>声阅导出阅读页</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button,.player select{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p><h1>${processingName || "智能阅读项目建设方案"}</h1>${sections}</main><div class="player"><button id="play">▶ 开始播放</button><select id="voices" aria-label="选择音色"></select></div><script>const text=document.querySelector('main').innerText,v=document.querySelector('#voices'),b=document.querySelector('#play');function load(){const a=speechSynthesis.getVoices();v.innerHTML=a.map((x,i)=>'<option value="'+i+'">'+x.name+' · '+x.lang+'</option>').join('');}load();speechSynthesis.onvoiceschanged=load;b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text),a=speechSynthesis.getVoices();u.voice=a[v.value]||null;u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
+    const sections = readerDocument.sections.map((section) => `<section><p class="eyebrow">${escapeHtml(section.eyebrow)}</p><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(readerDocument.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button,.player select{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p><h1>${escapeHtml(readerDocument.title)}</h1><p class="deck">${escapeHtml(readerDocument.description)}</p>${sections}</main><div class="player"><button id="play">▶ 开始播放</button><select id="voices" aria-label="选择音色"></select></div><script>const text=document.querySelector('main').innerText,v=document.querySelector('#voices'),b=document.querySelector('#play');function load(){const a=speechSynthesis.getVoices();v.innerHTML=a.map((x,i)=>'<option value="'+i+'">'+x.name+' · '+x.lang+'</option>').join('');}load();speechSynthesis.onvoiceschanged=load;b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text),a=speechSynthesis.getVoices();u.voice=a[v.value]||null;u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const href = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = href;
-    link.download = `${processingName || "声阅阅读页"}.html`;
+    link.download = `${readerDocument.title.replace(/[\\/:*?"<>|]/g, "-").slice(0, 80) || "声阅阅读页"}.html`;
     link.click();
     URL.revokeObjectURL(href);
     setNotice("H5 阅读页已导出，可直接在浏览器中打开。");
@@ -231,9 +297,9 @@ export default function Home() {
         ) : (
           <div className="url-zone">
             <label htmlFor="page-url">粘贴要阅读的网页地址</label>
-            <div className={`url-field ${urlError ? "error" : ""}`}><AppIcon name="link" /><input id="page-url" value={url} onChange={(event) => { setUrl(event.target.value); setUrlError(""); }} onKeyDown={(event) => event.key === "Enter" && submitUrl()} placeholder="https://example.com/article" /><button onClick={submitUrl}>抓取并转换 <span>→</span></button></div>
-            {urlError ? <p className="field-error">{urlError}</p> : <p className="url-help">Crawl4AI 将自动识别正文、标题、图片与表格结构</p>}
-            <div className="url-example"><span>没有链接？</span><button onClick={() => { setUrl("https://docs.example.com/ai-reading"); setUrlError(""); }}>使用示例链接</button></div>
+            <div className={`url-field ${urlError ? "error" : ""}`}><AppIcon name="link" /><input id="page-url" value={url} onChange={(event) => { setUrl(event.target.value); setUrlError(""); }} onKeyDown={(event) => event.key === "Enter" && void submitUrl()} placeholder="www.beijing.gov.cn" /><button onClick={() => void submitUrl()} disabled={isCrawling}>{isCrawling ? "正在抓取…" : "抓取并转换"} <span>→</span></button></div>
+            {urlError ? <p className="field-error">{urlError}</p> : <p className="url-help">服务端将提取真实标题与正文；抓取失败时不会用示例内容替代</p>}
+            <div className="url-example"><span>没有链接？</span><button onClick={() => { setUrl("https://www.beijing.gov.cn/"); setUrlError(""); }}>使用北京市政府首页</button></div>
           </div>
         )}
         {notice && <div className="notice" role="status">{notice}</div>}
@@ -249,7 +315,7 @@ export default function Home() {
 
   const renderProcessing = () => {
     const steps = [
-      { label: "资源校验", at: 8 }, { label: sourceType === "url" ? "Crawl4AI 抓取" : "内容解析", at: 24 }, { label: "版面归一化", at: 48 }, { label: "生成 H5", at: 68 }, { label: "知识切分", at: 82 }, { label: "构建索引", at: 96 },
+      { label: "网址校验", at: 8 }, { label: "服务端抓取", at: 24 }, { label: "正文提取", at: 48 }, { label: "结构化", at: 68 }, { label: "生成阅读页", at: 82 }, { label: "完成", at: 96 },
     ];
     return (
       <main className="processing-page">
@@ -258,12 +324,16 @@ export default function Home() {
           <div className="processing-animation"><span className="doc-sheet"><i /><i /><i /></span><span className="pulse-ring ring-one" /><span className="pulse-ring ring-two" /></div>
           <p className="overline">正在转换</p>
           <h1>{processingName}</h1>
-          <p>内容很快就会变成可阅读、可朗读的网页</p>
-          <div className="big-progress"><span style={{ width: `${progress}%` }} /></div>
-          <div className="progress-meta"><strong>{progress}%</strong><span>预计剩余 {Math.max(1, Math.round((100 - progress) / 18))} 秒</span></div>
-          <div className="pipeline-steps">{steps.map((step) => <div key={step.label} className={progress >= step.at ? "done" : progress + 16 >= step.at ? "current" : ""}><span>{progress >= step.at ? "✓" : ""}</span><small>{step.label}</small></div>)}</div>
+          <p>{processingError ? "未生成任何替代内容" : "正在读取目标网站并提取真实正文"}</p>
+          {processingError ? (
+            <div className="processing-error" role="alert"><strong>网页抓取失败</strong><p>{processingError}</p><button className="primary-button" onClick={() => setView("create")}>返回修改网址</button></div>
+          ) : <>
+            <div className="big-progress"><span style={{ width: `${progress}%` }} /></div>
+            <div className="progress-meta"><strong>{progress}%</strong><span>{progress === 100 ? "正在打开阅读页" : "正在等待目标网站响应"}</span></div>
+            <div className="pipeline-steps">{steps.map((step) => <div key={step.label} className={progress >= step.at ? "done" : progress + 16 >= step.at ? "current" : ""}><span>{progress >= step.at ? "✓" : ""}</span><small>{step.label}</small></div>)}</div>
+          </>}
         </section>
-        <p className="processing-tip">你可以离开此页，转换会在后台继续</p>
+        <p className="processing-tip">阅读页、TTS 与 H5 导出将共用这次真实抓取的内容</p>
       </main>
     );
   };
@@ -272,26 +342,26 @@ export default function Home() {
     <main className="reader-page">
       <aside className="reader-outline">
         <button className="back-link" onClick={() => { window.speechSynthesis?.cancel(); setSpeaking(false); setView("create"); }}>← 返回</button>
-        <div className="outline-file"><span className="pdf-tile">{selectedFile?.name.split(".").pop()?.toUpperCase() || (sourceType === "url" ? "URL" : "PDF")}</span><div><strong>{processingName || "智能阅读项目建设方案"}</strong><small>3 章 · 约 6 分钟</small></div></div>
+        <div className="outline-file"><span className="pdf-tile">{selectedFile?.name.split(".").pop()?.toUpperCase() || (readerDocument.sourceUrl ? "URL" : "DEMO")}</span><div><strong>{readerDocument.title}</strong><small>{readerDocument.sections.length} 章 · 约 {Math.max(1, Math.ceil(readerDocument.wordCount / 350))} 分钟</small></div></div>
         <p className="outline-title">文章目录</p>
-        <nav>{sampleSections.map((section, index) => <a key={section.id} href={`#${section.id}`}><span>0{index + 1}</span>{section.title}</a>)}</nav>
-        <div className="private-note"><AppIcon name="lock" /><span><strong>已存入私有知识库</strong><small>仅你可检索这份资料</small></span></div>
+        <nav>{readerDocument.sections.map((section, index) => <a key={section.id} href={`#${section.id}`}><span>{String(index + 1).padStart(2, "0")}</span>{section.title}</a>)}</nav>
+        <div className="private-note"><AppIcon name={readerDocument.engine === "demo" ? "book" : "check"} /><span><strong>{readerDocument.engine === "demo" ? "明确标记的阅读示例" : "已使用真实抓取结果"}</strong><small>{readerDocument.engine === "crawl4ai" ? "Crawl4AI 处理" : readerDocument.engine === "demo" ? "不代表用户文件或网页" : "服务端 HTML 正文提取"}</small></span></div>
       </aside>
       <article className="reader-article">
-        <div className="article-meta"><span>声阅智能排版</span><span>·</span><span>2026 年 8 月 14 日</span></div>
-        <h1>{processingName || "智能阅读项目建设方案"}</h1>
-        <p className="article-deck">从内容导入、结构化处理到语音阅读与私有知识库，构建一套稳定、可扩展的企业级内容阅读平台。</p>
+        <div className="article-meta"><span>{readerDocument.siteName}</span><span>·</span><span>{readerDocument.engine === "demo" ? "阅读示例" : "实时网页抓取"}</span>{readerDocument.sourceUrl && <><span>·</span><a href={readerDocument.sourceUrl} target="_blank" rel="noreferrer">查看原网页 ↗</a></>}</div>
+        <h1>{readerDocument.title}</h1>
+        <p className="article-deck">{readerDocument.description}</p>
         <div className="article-rule" />
-        {sampleSections.map((section) => <section key={section.id} id={section.id}><p className="section-eyebrow">{section.eyebrow}</p><h2>{section.title}</h2>{section.paragraphs.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}</section>)}
+        {readerDocument.sections.map((section) => <section key={section.id} id={section.id}><p className="section-eyebrow">{section.eyebrow}</p><h2>{section.title}</h2>{section.paragraphs.map((paragraph, index) => <p key={`${section.id}-${index}`}>{paragraph}</p>)}</section>)}
         <div className="article-end"><span /> 文章结束 <span /></div>
       </article>
       <div className="reader-actions">
-        <button className="secondary-action" onClick={downloadOriginal}><AppIcon name="download" />原文件</button>
+        <button className="secondary-action" onClick={downloadOriginal}><AppIcon name={readerDocument.sourceUrl ? "link" : "download"} />{readerDocument.sourceUrl ? "原网页" : "原文件"}</button>
         <button className="export-action" onClick={exportH5}><AppIcon name="arrow" />导出 H5</button>
       </div>
       <div className="tts-player">
         <button className="play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
-        <div className="track-info"><div><strong>{speaking ? "正在朗读 · " : "准备就绪 · "}01</strong><span>{sampleSections[0].title}</span></div><div className="audio-progress"><span style={{ width: `${speechProgress}%` }} /></div></div>
+        <div className="track-info"><div><strong>{speaking ? "正在朗读 · " : "准备就绪 · "}01</strong><span>{readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className="audio-progress"><span style={{ width: `${speechProgress}%` }} /></div></div>
         <div className="voice-select"><label htmlFor="voice">音色</label><select id="voice" value={voiceName} onChange={(event) => setVoiceName(event.target.value)}>{voices.length ? voices.slice(0, 12).map((voice) => <option key={`${voice.name}-${voice.lang}`} value={voice.name}>{voice.name} · {voice.lang}</option>) : <option>系统默认音色</option>}</select></div>
         <span className="speed-pill">1.0×</span>
       </div>
@@ -304,7 +374,7 @@ export default function Home() {
       <div className="page-heading"><div><p className="overline">个人空间</p><h1>我的知识库</h1><p>你导入的每份资料，都会自动在这里建立私有索引。</p></div><button className="primary-button" onClick={() => setView("create")}><AppIcon name="plus" />导入新资料</button></div>
       <div className="library-stats"><div><small>已收录资料</small><strong>24</strong><span>本月 +7</span></div><div><small>可检索知识块</small><strong>1,284</strong><span>100% 已索引</span></div><div><small>已转换阅读时长</small><strong>6.8h</strong><span>约节省 4.1h</span></div></div>
       <div className="library-toolbar"><div className="search-box"><span>⌕</span><input aria-label="搜索知识库" placeholder="搜索文件名、类型或内容…" /></div><button>全部类型 ⌄</button><button>最近更新 ⌄</button></div>
-      <div className="library-grid">{libraryItems.map((item) => <button className="library-card" key={item.name} onClick={() => { setProcessingName(item.name); setView("reader"); }}><div className={`library-cover ${item.color}`}><span>{item.type}</span><i /><i /><i /></div><div className="library-card-body"><span className="indexed"><i /> 已完成索引</span><h2>{item.name}</h2><p>{item.type} · {item.size} · {item.chunks} 个知识块</p><div><span>{item.time}</span><span>打开阅读 →</span></div></div></button>)}</div>
+      <div className="library-grid">{libraryItems.map((item) => <button className="library-card" key={item.name} onClick={() => { setReaderDocument(demoDocument); setSourceType("file"); setProcessingName(demoDocument.title); setView("reader"); }}><div className={`library-cover ${item.color}`}><span>{item.type}</span><i /><i /><i /></div><div className="library-card-body"><span className="indexed"><i /> 已完成索引</span><h2>{item.name}</h2><p>{item.type} · {item.size} · {item.chunks} 个知识块</p><div><span>{item.time}</span><span>打开阅读示例 →</span></div></div></button>)}</div>
       <div className="tenant-banner"><AppIcon name="lock" /><div><strong>你的知识，只属于你</strong><p>平台在数据库、对象存储和向量检索三层强制执行用户与租户隔离。</p></div><span>tenant_8f3a · 私有</span></div>
     </main>
   );
@@ -338,7 +408,7 @@ export default function Home() {
           <button onClick={() => setView("library")}><AppIcon name="clock" />处理记录</button>
           <button className={view === "api" ? "active" : ""} onClick={() => setView("api")}><AppIcon name="code" />API 文档</button>
         </nav>
-        <div className="header-actions"><button className="demo-link" onClick={() => { setProcessingName("智能阅读项目建设方案"); setView("reader"); }}>体验阅读示例 <span>→</span></button><button className="avatar" aria-label="用户菜单">MK<span /></button></div>
+        <div className="header-actions"><button className="demo-link" onClick={() => { setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button><button className="avatar" aria-label="用户菜单">MK<span /></button></div>
       </header>
       {view === "create" && renderCreate()}
       {view === "processing" && renderProcessing()}
