@@ -2,6 +2,7 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { handleCrawlRequest } from "./crawl";
+import { handleShareRequest } from "./share";
 
 interface Env {
   ASSETS: Fetcher;
@@ -33,6 +34,10 @@ const worker = {
 
     if (url.pathname === "/api/crawl") {
       return handleCrawlRequest(request, env);
+    }
+
+    if (url.pathname === "/api/shares" || url.pathname.startsWith("/api/shares/")) {
+      return handleShareRequest(request);
     }
 
     if (url.pathname === "/_vinext/image") {

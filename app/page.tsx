@@ -80,9 +80,9 @@ function Wordmark() {
   );
 }
 
-function AppIcon({ name }: { name: "plus" | "book" | "clock" | "code" | "arrow" | "upload" | "link" | "file" | "lock" | "download" | "play" | "pause" | "check" }) {
+function AppIcon({ name }: { name: "plus" | "book" | "clock" | "code" | "arrow" | "upload" | "link" | "file" | "lock" | "download" | "play" | "pause" | "check" | "share" | "copy" | "close" }) {
   const map = {
-    plus: "+", book: "▦", clock: "◷", code: "</>", arrow: "↗", upload: "↑", link: "∞", file: "▤", lock: "◈", download: "↓", play: "▶", pause: "Ⅱ", check: "✓",
+    plus: "+", book: "▦", clock: "◷", code: "</>", arrow: "↗", upload: "↑", link: "∞", file: "▤", lock: "◈", download: "↓", play: "▶", pause: "Ⅱ", check: "✓", share: "↗", copy: "⧉", close: "×",
   };
   return <span className={`app-icon icon-${name}`} aria-hidden="true">{map[name]}</span>;
 }
@@ -110,6 +110,15 @@ export default function Home() {
   const [readerDocument, setReaderDocument] = useState<ReaderDocument>(demoDocument);
   const [isCrawling, setIsCrawling] = useState(false);
   const [processingError, setProcessingError] = useState("");
+  const [shareLink, setShareLink] = useState("");
+  const [shareId, setShareId] = useState("");
+  const [shareRevokeToken, setShareRevokeToken] = useState("");
+  const [shareExpiresAt, setShareExpiresAt] = useState("");
+  const [shareTtlHours, setShareTtlHours] = useState(168);
+  const [shareAllowDownload, setShareAllowDownload] = useState(true);
+  const [sharePanelOpen, setSharePanelOpen] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
+  const [shareError, setShareError] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
@@ -262,6 +271,78 @@ export default function Home() {
     setNotice("H5 阅读页已导出，可直接在浏览器中打开。");
   };
 
+  const copyToClipboard = async (value: string, successMessage: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setNotice(successMessage);
+    } catch {
+      setNotice("浏览器未授予剪贴板权限，请手动复制链接。");
+    }
+  };
+
+  const createShare = async () => {
+    if (isSharing) return;
+    setIsSharing(true);
+    setShareError("");
+    try {
+      const response = await fetch("/api/shares", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          document: readerDocument,
+          expires_in_hours: shareTtlHours,
+          allow_download: shareAllowDownload,
+        }),
+      });
+      const result = await response.json() as {
+        id?: string; share_url?: string; expires_at?: string; revoke_token?: string; message?: string;
+      };
+      if (!response.ok || !result.id || !result.share_url || !result.revoke_token) {
+        throw new Error(result.message || "分享链接生成失败。");
+      }
+      setShareId(result.id);
+      setShareLink(result.share_url);
+      setShareExpiresAt(result.expires_at || "");
+      setShareRevokeToken(result.revoke_token);
+      await copyToClipboard(result.share_url, "分享链接已复制，可直接转发给他人。");
+    } catch (error) {
+      setShareError(error instanceof Error ? error.message : "分享链接生成失败。");
+    } finally {
+      setIsSharing(false);
+    }
+  };
+
+  const forwardShare = async () => {
+    if (!shareLink) return;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: readerDocument.title, text: readerDocument.description, url: shareLink });
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
+    }
+    await copyToClipboard(shareLink, "分享链接已复制，可粘贴到微信、邮件或工作群。");
+  };
+
+  const revokeShare = async () => {
+    if (!shareId || !shareRevokeToken) return;
+    try {
+      const response = await fetch(`/api/shares/${shareId}`, {
+        method: "DELETE",
+        headers: { "x-share-revoke-token": shareRevokeToken },
+      });
+      if (!response.ok) throw new Error("关闭分享失败，请稍后重试。");
+      setShareLink("");
+      setShareId("");
+      setShareRevokeToken("");
+      setShareExpiresAt("");
+      setNotice("分享链接已关闭，访问者将无法继续打开。 ");
+    } catch (error) {
+      setShareError(error instanceof Error ? error.message : "关闭分享失败。");
+    }
+  };
+
   const renderCreate = () => (
     <main className="create-page">
       <section className="hero-copy">
@@ -356,8 +437,25 @@ export default function Home() {
         <div className="article-end"><span /> 文章结束 <span /></div>
       </article>
       <div className="reader-actions">
-        <button className="secondary-action" onClick={downloadOriginal}><AppIcon name={readerDocument.sourceUrl ? "link" : "download"} />{readerDocument.sourceUrl ? "原网页" : "原文件"}</button>
-        <button className="export-action" onClick={exportH5}><AppIcon name="arrow" />导出 H5</button>
+        <button className="secondary-action" onClick={downloadOriginal}><AppIcon name={readerDocument.sourceUrl ? "link" : "download"} />{readerDocument.sourceUrl ? "打开原网页" : "下载原文件"}</button>
+        <button className="share-action" onClick={() => { setShareError(""); setSharePanelOpen((open) => !open); }} aria-expanded={sharePanelOpen} aria-controls="share-panel"><AppIcon name="share" />生成分享链接</button>
+        <button className="export-action" onClick={exportH5}><AppIcon name="download" />一键下载 H5</button>
+        {sharePanelOpen && <section className="share-panel" id="share-panel" aria-label="分享阅读页">
+          <div className="share-panel-heading"><div><p>转发阅读页</p><small>链接默认只读，可随时关闭</small></div>{shareLink && <button className="icon-button" onClick={revokeShare} aria-label="关闭分享"><AppIcon name="close" /></button>}</div>
+          {shareLink ? (
+            <>
+              <div className="share-link-field"><input readOnly value={shareLink} aria-label="分享链接" /><button onClick={() => void copyToClipboard(shareLink, "分享链接已复制。")} aria-label="复制分享链接"><AppIcon name="copy" />复制</button></div>
+              <div className="share-panel-meta"><span>有效至 {shareExpiresAt ? new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(shareExpiresAt)) : "--"}</span><button onClick={() => void forwardShare()}>转发 ↗</button></div>
+            </>
+          ) : (
+            <>
+              <div className="share-options"><label>有效期<select value={shareTtlHours} onChange={(event) => setShareTtlHours(Number(event.target.value))}><option value={24}>24 小时</option><option value={168}>7 天</option><option value={720}>30 天</option></select></label><label className="toggle-option"><input type="checkbox" checked={shareAllowDownload} onChange={(event) => setShareAllowDownload(event.target.checked)} /><span />允许下载 H5</label></div>
+              <button className="share-create-button" onClick={() => void createShare()} disabled={isSharing}>{isSharing ? "正在生成…" : "生成并复制链接"}<AppIcon name="arrow" /></button>
+            </>
+          )}
+          {shareError && <p className="share-error" role="alert">{shareError}</p>}
+          <p className="share-hint">体验环境的链接为临时服务实例保存；正式环境将按文档所有者、有效期和访问策略持久化。</p>
+        </section>}
       </div>
       <div className="tts-player">
         <button className="play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
@@ -390,6 +488,8 @@ export default function Home() {
           ["GET", "/v1/jobs/{job_id}/events", "SSE 订阅实时进度"],
           ["GET", "/v1/documents/{document_id}", "获取文档与产物状态"],
           ["GET", "/v1/documents/{document_id}/reader", "获取结构化阅读模型"],
+          ["POST", "/v1/documents/{document_id}/shares", "生成可撤销的阅读分享链接"],
+          ["GET", "/v1/public/shares/{share_token}", "匿名打开已授权的分享阅读页"],
           ["POST", "/v1/tts/sessions", "创建 TTS 流式会话"],
           ["POST", "/v1/knowledge/search", "在当前用户知识库检索"],
         ].map(([method, path, desc]) => <div className="endpoint" key={path}><span className={`method ${method.toLowerCase()}`}>{method}</span><code>{path}</code><p>{desc}</p><button aria-label={`查看 ${path}`}>↗</button></div>)}

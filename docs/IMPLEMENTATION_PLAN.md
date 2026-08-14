@@ -2,7 +2,7 @@
 
 ## 1. 结论与建设范围
 
-建议采用“同步接入 + 异步处理 + 对象存储 + 用户级知识索引”的架构。前端上传或提交 URL 后立即拿到 `job_id`，通过 SSE 接收实时进度；后台按文件类型进入不同 Worker 池，最终生成结构化 Reader JSON、可导出 H5、原文件下载链接及用户私有知识索引。
+建议采用“同步接入 + 异步处理 + 对象存储 + 用户级知识索引”的架构。前端上传或提交 URL 后立即拿到 `job_id`，通过 SSE 接收实时进度；后台按文件类型进入不同 Worker 池，最终生成结构化 Reader JSON、可导出 H5、原文件下载链接、可撤销的分享链接及用户私有知识索引。
 
 本期建设分三个边界：
 
@@ -86,6 +86,14 @@ flowchart LR
 4. API 返回音频分片 URL 与 word/mark timing，前端实现边读边播与语句高亮。
 5. 供应商做 adapter，可接 Azure/Google/阿里云/火山/私有模型；上层 API 不感知具体供应商。
 
+## 4.1 分享与一键下载（功能 3）
+
+- 文档处理完成后，资料所有者可创建**只读分享链接**；分享页仅暴露 Reader JSON 与经清洗的 H5，不直接暴露对象存储 key、原始上传 URL 或其他用户资料。
+- 创建时可设置有效期（例如 24 小时、7 天、30 天）、是否允许下载 H5、可选访问密码；服务端生成不少于 128 bit 熵的随机 `share_token`，客户端只能使用服务端返回的完整 `reader_url`，不能自行拼接。
+- 分享记录写入 `document_shares`：`id`、`tenant_id`、`document_id`、`owner_user_id`、`token_hash`、`expires_at`、`allow_download`、`password_hash`、`status`、`created_at`、`revoked_at`、`last_accessed_at`。token 仅以哈希存库，首次创建时只返回一次明文链接。
+- 访问分享页时，仅查询 `status = active` 且 `expires_at > now()` 的记录；读取次数、IP 摘要和失败密码尝试进入审计日志，并按 token/IP 做限流。撤销操作立即使 token 失效，并同步删除已签发下载 URL 的缓存。
+- “一键下载”对资料所有者调用 `/artifacts/original` 或 `/artifacts/h5` 获取 5 分钟预签名 URL；分享访问者只有在 `allow_download = true` 时可获得短时 H5 下载 URL，不能下载原始上传文件，除非产品显式增加该权限。
+
 ## 5. 用户级知识库
 
 ### 5.1 隔离规则
@@ -103,6 +111,7 @@ flowchart LR
 - `jobs` / `job_events`：处理进度、尝试次数、可重试错误、trace_id。
 - `knowledge_chunks`：分块文本、来源页、标题路径、token 数、embedding 版本。
 - `artifacts`：原文件、H5、预览图、音频的 object key、MIME、大小、hash。
+- `document_shares`：带时效、下载权限、撤销状态和审计关联的分享记录；绝不将 token 明文入库。
 - `document_acl`：未来支持用户/组共享；MVP 默认只写 owner。
 
 ## 6. 200 并发方案
@@ -173,4 +182,4 @@ flowchart LR
 
 ## 10. 本原型的边界
 
-当前仓库中的 UI 是可交互高保真原型。URL 导入已连接真实服务端抓取：配置 `CUSTOMER_HTTP_CRAWLER` 私有绑定时使用 `services/crawler` 中的 Crawl4AI 0.9.2 服务；未配置时使用 Worker HTML 正文提取器。两条路径的结果都会进入 Reader、TTS 和 H5 导出，且抓取失败时明确报错，不再使用内置示例冒充网页正文。文件选择、格式校验、浏览器音色选择与朗读、单 HTML 导出和原文件回下载可直接体验；Office/PDF 服务端解析和知识库持久化仍待按 OpenAPI 契约接入。
+当前仓库中的 UI 是可交互高保真原型。URL 导入已连接真实服务端抓取：配置 `CUSTOMER_HTTP_CRAWLER` 私有绑定时使用 `services/crawler` 中的 Crawl4AI 0.9.2 服务；未配置时使用 Worker HTML 正文提取器。两条路径的结果都会进入 Reader、TTS 和 H5 导出，且抓取失败时明确报错，不再使用内置示例冒充网页正文。文件选择、格式校验、浏览器音色选择与朗读、单 HTML 导出和原文件回下载可直接体验。开发环境还提供可打开、可关闭的临时分享链接，正式环境须将其替换为上述 `document_shares` 表、私有对象存储与鉴权 API；Office/PDF 服务端解析和知识库持久化仍待按 OpenAPI 契约接入。
