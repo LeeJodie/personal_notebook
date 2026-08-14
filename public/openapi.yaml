@@ -1,0 +1,449 @@
+openapi: 3.1.0
+info:
+  title: ShengYue Content Reader API
+  version: 1.0.0
+  description: URL/file ingestion, asynchronous conversion, H5 export, TTS and user-scoped knowledge APIs.
+servers:
+  - url: https://api.example.com
+security:
+  - bearerAuth: []
+tags:
+  - { name: Uploads }
+  - { name: Documents }
+  - { name: Jobs }
+  - { name: TTS }
+  - { name: Knowledge }
+paths:
+  /v1/assets/uploads:
+    post:
+      tags: [Uploads]
+      summary: Create a direct-upload session
+      operationId: createUploadSession
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUploadRequest' }
+      responses:
+        '201':
+          description: Upload session created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+  /v1/documents:
+    get:
+      tags: [Documents]
+      summary: List documents visible to the current user
+      operationId: listDocuments
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/DocumentStatus' }
+      responses:
+        '200':
+          description: Document page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Document' } }
+                  next_cursor: { type: [string, 'null'] }
+    post:
+      tags: [Documents]
+      summary: Finalize an uploaded asset and create a processing job
+      operationId: createDocumentFromUpload
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [upload_id]
+              properties:
+                upload_id: { type: string, format: uuid }
+                title: { type: string, maxLength: 300 }
+                knowledge_scope: { type: string, enum: [private], default: private }
+      responses:
+        '202':
+          description: Processing accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcceptedJob' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  '/v1/documents:import-url':
+    post:
+      tags: [Documents]
+      summary: Create a Crawl4AI import job
+      operationId: importDocumentUrl
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [url]
+              properties:
+                url: { type: string, format: uri, maxLength: 4096 }
+                title: { type: string, maxLength: 300 }
+                crawl_options:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    wait_for: { type: string, maxLength: 200 }
+                    include_images: { type: boolean, default: true }
+                    max_depth: { type: integer, minimum: 0, maximum: 1, default: 0 }
+      responses:
+        '202':
+          description: Crawl accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcceptedJob' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/documents/{document_id}:
+    parameters: [{ $ref: '#/components/parameters/DocumentId' }]
+    get:
+      tags: [Documents]
+      summary: Get document metadata and artifact status
+      operationId: getDocument
+      responses:
+        '200':
+          description: Document
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Documents]
+      summary: Delete document, artifacts, chunks, vectors and cached audio
+      operationId: deleteDocument
+      responses:
+        '202':
+          description: Deletion accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcceptedJob' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/documents/{document_id}/reader:
+    get:
+      tags: [Documents]
+      summary: Get structured reader content
+      operationId: getDocumentReader
+      parameters: [{ $ref: '#/components/parameters/DocumentId' }]
+      responses:
+        '200':
+          description: Reader model
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReaderDocument' }
+        '409': { $ref: '#/components/responses/Problem' }
+  /v1/documents/{document_id}/artifacts/{artifact_type}:
+    get:
+      tags: [Documents]
+      summary: Obtain a short-lived download URL for original or H5 artifact
+      operationId: getDocumentArtifact
+      parameters:
+        - { $ref: '#/components/parameters/DocumentId' }
+        - name: artifact_type
+          in: path
+          required: true
+          schema: { type: string, enum: [original, h5, offline_zip] }
+      responses:
+        '200':
+          description: Download descriptor
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [download_url, expires_at, filename]
+                properties:
+                  download_url: { type: string, format: uri }
+                  expires_at: { type: string, format: date-time }
+                  filename: { type: string }
+                  sha256: { type: string }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/jobs/{job_id}:
+    get:
+      tags: [Jobs]
+      summary: Get processing job state
+      operationId: getJob
+      parameters: [{ $ref: '#/components/parameters/JobId' }]
+      responses:
+        '200':
+          description: Job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/jobs/{job_id}/events:
+    get:
+      tags: [Jobs]
+      summary: Subscribe to resumable progress events
+      operationId: subscribeJobEvents
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { name: Last-Event-ID, in: header, schema: { type: string } }
+      responses:
+        '200':
+          description: SSE stream with progress, completed and failed events
+          content:
+            text/event-stream:
+              schema: { type: string }
+  /v1/tts/voices:
+    get:
+      tags: [TTS]
+      summary: List available voices
+      operationId: listVoices
+      parameters: [{ name: language, in: query, schema: { type: string, example: zh-CN } }]
+      responses:
+        '200':
+          description: Voices
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Voice' } }
+  /v1/tts/sessions:
+    post:
+      tags: [TTS]
+      summary: Create or resume a streaming TTS session
+      operationId: createTtsSession
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [document_id, voice_id]
+              properties:
+                document_id: { type: string, format: uuid }
+                voice_id: { type: string }
+                start_block_id: { type: string }
+                rate: { type: number, minimum: 0.5, maximum: 2, default: 1 }
+                pitch: { type: number, minimum: -10, maximum: 10, default: 0 }
+      responses:
+        '201':
+          description: TTS session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TtsSession' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /v1/knowledge/search:
+    post:
+      tags: [Knowledge]
+      summary: Search the current user's private knowledge base
+      operationId: searchKnowledge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [query]
+              properties:
+                query: { type: string, minLength: 1, maxLength: 2000 }
+                document_ids: { type: array, maxItems: 100, items: { type: string, format: uuid } }
+                limit: { type: integer, minimum: 1, maximum: 50, default: 10 }
+                mode: { type: string, enum: [hybrid, vector, keyword], default: hybrid }
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/SearchHit' } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 16, maxLength: 128 }
+    DocumentId:
+      name: document_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    Problem:
+      description: RFC 9457 problem details
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    CreateUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [filename, size_bytes, content_type, sha256]
+      properties:
+        filename: { type: string, maxLength: 300 }
+        size_bytes: { type: integer, minimum: 1, maximum: 209715200 }
+        content_type: { type: string }
+        sha256: { type: string, pattern: '^[a-fA-F0-9]{64}$' }
+    UploadSession:
+      type: object
+      required: [upload_id, method, upload_url, headers, expires_at]
+      properties:
+        upload_id: { type: string, format: uuid }
+        method: { type: string, enum: [PUT] }
+        upload_url: { type: string, format: uri }
+        headers: { type: object, additionalProperties: { type: string } }
+        expires_at: { type: string, format: date-time }
+    DocumentStatus:
+      type: string
+      enum: [queued, validating, crawling, parsing, rendering, indexing, ready, failed, deleting]
+    Document:
+      type: object
+      required: [id, title, source_type, status, created_at, updated_at, artifacts]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        source_type: { type: string, enum: [upload, url] }
+        source_url: { type: [string, 'null'], format: uri }
+        filename: { type: [string, 'null'] }
+        media_type: { type: [string, 'null'] }
+        size_bytes: { type: [integer, 'null'] }
+        status: { $ref: '#/components/schemas/DocumentStatus' }
+        progress: { type: integer, minimum: 0, maximum: 100 }
+        chunk_count: { type: integer, minimum: 0 }
+        reading_time_seconds: { type: integer, minimum: 0 }
+        artifacts:
+          type: array
+          items:
+            type: object
+            required: [type, ready]
+            properties:
+              type: { type: string, enum: [original, h5, offline_zip] }
+              ready: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AcceptedJob:
+      type: object
+      required: [document_id, job_id, status, events_url]
+      properties:
+        document_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued] }
+        events_url: { type: string, format: uri-reference }
+    Job:
+      type: object
+      required: [id, document_id, status, stage, progress, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, succeeded, failed, canceled] }
+        stage: { $ref: '#/components/schemas/DocumentStatus' }
+        progress: { type: integer, minimum: 0, maximum: 100 }
+        message: { type: string }
+        error: { oneOf: [{ $ref: '#/components/schemas/Problem' }, { type: 'null' }] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ReaderDocument:
+      type: object
+      required: [document_id, title, language, version, sections]
+      properties:
+        document_id: { type: string, format: uuid }
+        title: { type: string }
+        language: { type: string }
+        version: { type: integer, minimum: 1 }
+        reading_time_seconds: { type: integer }
+        sections:
+          type: array
+          items:
+            type: object
+            required: [id, title, blocks]
+            properties:
+              id: { type: string }
+              title: { type: string }
+              level: { type: integer, minimum: 1, maximum: 6 }
+              blocks:
+                type: array
+                items:
+                  type: object
+                  required: [id, type]
+                  properties:
+                    id: { type: string }
+                    type: { type: string, enum: [heading, paragraph, list, table, image, quote, code, page_break] }
+                    text: { type: string }
+                    html: { type: string, description: Sanitized block HTML }
+                    source_page: { type: integer, minimum: 1 }
+    Voice:
+      type: object
+      required: [id, name, language, provider]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        language: { type: string }
+        style: { type: string }
+        provider: { type: string }
+        preview_url: { type: string, format: uri }
+    TtsSession:
+      type: object
+      required: [id, document_id, voice_id, segments, expires_at]
+      properties:
+        id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        voice_id: { type: string }
+        segments:
+          type: array
+          items:
+            type: object
+            required: [block_id, status]
+            properties:
+              block_id: { type: string }
+              status: { type: string, enum: [ready, synthesizing, queued] }
+              audio_url: { type: string, format: uri }
+              timing_url: { type: string, format: uri }
+        events_url: { type: string, format: uri-reference }
+        expires_at: { type: string, format: date-time }
+    SearchHit:
+      type: object
+      required: [document_id, chunk_id, score, text]
+      properties:
+        document_id: { type: string, format: uuid }
+        document_title: { type: string }
+        chunk_id: { type: string, format: uuid }
+        score: { type: number, minimum: 0, maximum: 1 }
+        text: { type: string }
+        heading_path: { type: array, items: { type: string } }
+        source_page: { type: integer, minimum: 1 }
+    Problem:
+      type: object
+      required: [type, title, status, code, trace_id, retryable]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        code: { type: string, example: UNSUPPORTED_FILE_TYPE }
+        trace_id: { type: string }
+        retryable: { type: boolean }
