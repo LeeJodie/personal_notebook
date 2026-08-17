@@ -61,6 +61,9 @@ test("reader exposes H5 download and a revocable share link", async () => {
   assert.match(shareWorker, /SHARE_DOWNLOAD_FORBIDDEN/);
   assert.match(sharePage, /下载 H5/);
   assert.match(sharePage, /\/v1\/public\/shares\//);
+  assert.match(page, /const changeVoice/);
+  assert.match(page, /speakFromOffset/);
+  assert.match(sharePage, /const changeVoice/);
 });
 
 test("backend includes durable document parsing and private knowledge boundaries", async () => {
@@ -76,4 +79,18 @@ test("backend includes durable document parsing and private knowledge boundaries
   assert.match(processor, /parse_xlsx/);
   assert.match(share, /tokenHash/);
   assert.match(share, /owner_user_id/);
+});
+
+test("file processing never presents itself as a web crawl and history is a real tab", async () => {
+  const [page, documents, packageJson] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("worker/documents.ts", root), "utf8"),
+    readFile(new URL("package.json", root), "utf8"),
+  ]);
+  assert.match(page, /const isUrlImport = sourceType === "url"/);
+  assert.match(page, /文档解析/);
+  assert.match(page, /const openHistory/);
+  assert.match(page, /view === "history"/);
+  assert.match(documents, /invokeDocumentProcessor/);
+  assert.match(packageJson, /dev:processor/);
 });

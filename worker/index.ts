@@ -12,6 +12,7 @@ interface Env {
   CUSTOMER_HTTP_CRAWLER?: Fetcher;
   CUSTOMER_HTTP_DOCUMENT_PROCESSOR?: Fetcher;
   CUSTOMER_HTTP_KNOWLEDGE_INDEX?: Fetcher;
+  LOCAL_DOCUMENT_PROCESSOR_URL?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {

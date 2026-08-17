@@ -7,6 +7,9 @@ export interface DocumentEnv {
   CUSTOMER_HTTP_CRAWLER?: Fetcher;
   CUSTOMER_HTTP_DOCUMENT_PROCESSOR?: Fetcher;
   CUSTOMER_HTTP_KNOWLEDGE_INDEX?: Fetcher;
+  // Local-only Vite/Miniflare bridge. It is intentionally absent from hosted
+  // bindings, where the private HTTP service binding above is required.
+  LOCAL_DOCUMENT_PROCESSOR_URL?: string;
 }
 
 export interface Actor {
@@ -184,20 +187,25 @@ async function persistReader(env: DocumentEnv, actor: Actor, row: DocumentRow, r
 }
 
 async function invokeDocumentProcessor(env: DocumentEnv, row: DocumentRow): Promise<ReaderDocument> {
-  if (!env.CUSTOMER_HTTP_DOCUMENT_PROCESSOR || !row.original_key || !row.filename) {
-    throw new Error("文档解析服务尚未配置。Markdown 可直接处理；DOCX、PDF、XLSX 需要部署 document-processor 服务。");
-  }
+  if (!row.original_key || !row.filename) throw new Error("未找到待解析的原始文件。");
   const source = await env.DOCUMENTS.get(row.original_key);
   if (!source) throw new Error("未找到待解析的原始文件。");
-  const response = await env.CUSTOMER_HTTP_DOCUMENT_PROCESSOR.fetch("http://document-processor.internal/v1/parse", {
+  const init: RequestInit = {
     method: "POST",
     headers: {
       "content-type": row.media_type || "application/octet-stream",
-      "x-source-filename": row.filename,
+      // HTTP headers are ASCII-only in some local runtimes. Encoding preserves
+      // Chinese filenames for the parser and its generated reader metadata.
+      "x-source-filename": encodeURIComponent(row.filename),
       "x-source-url": row.source_url || "",
     },
     body: source.body,
-  });
+  };
+  const response = env.CUSTOMER_HTTP_DOCUMENT_PROCESSOR
+    ? await env.CUSTOMER_HTTP_DOCUMENT_PROCESSOR.fetch("http://document-processor.internal/v1/parse", init)
+    : env.LOCAL_DOCUMENT_PROCESSOR_URL
+      ? await fetch(`${env.LOCAL_DOCUMENT_PROCESSOR_URL.replace(/\/$/, "")}/v1/parse`, init)
+      : (() => { throw new Error("文档解析服务尚未启动。请先运行 npm run dev:processor；生产环境需配置 document-processor 私有服务绑定。"); })();
   const data = await response.json<{ document?: unknown; message?: string }>();
   if (!response.ok || !isReaderDocument(data.document)) {
     throw new Error(data.message || "文档解析服务没有返回可阅读内容。");

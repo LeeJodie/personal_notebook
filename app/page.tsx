@@ -2,7 +2,7 @@
 
 import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
-type View = "create" | "processing" | "reader" | "library" | "api";
+type View = "create" | "processing" | "reader" | "library" | "history" | "api";
 type SourceType = "file" | "url";
 
 interface ReaderSection {
@@ -143,6 +143,9 @@ export default function Home() {
   const [libraryError, setLibraryError] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const speechOffsetRef = useRef(0);
+  const speechSessionRef = useRef(0);
+  const crawlAbortRef = useRef<AbortController | null>(null);
 
   const articleText = useMemo(
     () => [readerDocument.title, readerDocument.description, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])].join("。"),
@@ -194,8 +197,15 @@ export default function Home() {
     void loadLibrary();
   };
 
+  const openHistory = () => {
+    setView("history");
+    void loadLibrary();
+  };
+
   const startProcessing = async () => {
     if (!selectedFile || isUploading) return;
+    crawlAbortRef.current?.abort();
+    crawlAbortRef.current = null;
     setSourceType("file");
     setProcessingName(selectedFile.name);
     setProcessingError("");
@@ -244,11 +254,14 @@ export default function Home() {
     setNotice("");
     setIsCrawling(true);
     setView("processing");
+    const controller = new AbortController();
+    crawlAbortRef.current = controller;
     try {
       const response = await fetch("/v1/documents:import-url", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ url: parsed.toString() }),
+        signal: controller.signal,
       });
       const result = await response.json() as { document?: { id?: string; error_message?: string }; reader?: Omit<ReaderDocument, "documentId"> | null; message?: string };
       if (!response.ok) throw new Error(result.document?.error_message || result.message || `抓取服务返回 ${response.status}`);
@@ -261,10 +274,14 @@ export default function Home() {
       setProgress(100);
       window.setTimeout(() => setView("reader"), 450);
     } catch (error) {
+      if (controller.signal.aborted) return;
       setProcessingError(error instanceof Error ? error.message : "网页抓取失败。");
       setProgress((current) => Math.min(current, 88));
     } finally {
-      setIsCrawling(false);
+      if (crawlAbortRef.current === controller) {
+        crawlAbortRef.current = null;
+        setIsCrawling(false);
+      }
     }
   };
 
@@ -275,6 +292,10 @@ export default function Home() {
       setNotice("当前已接入 DOCX、PDF、XLSX 和 Markdown；DOC、PPT/PPTX 将在下一阶段接入。");
       return;
     }
+    crawlAbortRef.current?.abort();
+    crawlAbortRef.current = null;
+    setSourceType("file");
+    setIsCrawling(false);
     setSelectedFile(file);
     setNotice("");
   };
@@ -285,27 +306,62 @@ export default function Home() {
     acceptFile(event.dataTransfer.files[0]);
   };
 
-  const playSpeech = () => {
-    if (!("speechSynthesis" in window)) {
+  const stopSpeech = (resetProgress = false) => {
+    speechSessionRef.current += 1;
+    window.speechSynthesis?.cancel();
+    utteranceRef.current = null;
+    setSpeaking(false);
+    if (resetProgress) {
+      speechOffsetRef.current = 0;
+      setSpeechProgress(0);
+    }
+  };
+
+  const speakFromOffset = (requestedOffset: number, selectedVoice = voiceName) => {
+    if (!("speechSynthesis" in window) || !articleText) {
       setNotice("当前浏览器不支持语音播放。");
       return;
     }
-    if (speaking) {
-      window.speechSynthesis.cancel();
-      setSpeaking(false);
-      return;
-    }
+    const offset = requestedOffset >= articleText.length ? 0 : Math.max(0, requestedOffset);
+    const session = speechSessionRef.current + 1;
+    speechSessionRef.current = session;
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(articleText);
+    const utterance = new SpeechSynthesisUtterance(articleText.slice(offset));
     utterance.lang = "zh-CN";
     utterance.rate = 1;
-    utterance.voice = voices.find((voice) => voice.name === voiceName) || null;
-    utterance.onboundary = (event) => setSpeechProgress(Math.min(100, Math.round((event.charIndex / articleText.length) * 100)));
-    utterance.onend = () => { setSpeaking(false); setSpeechProgress(100); };
-    utterance.onerror = () => setSpeaking(false);
+    utterance.voice = voices.find((voice) => voice.name === selectedVoice) || null;
+    utterance.onboundary = (event) => {
+      if (speechSessionRef.current !== session) return;
+      const absoluteOffset = Math.min(articleText.length, offset + event.charIndex);
+      speechOffsetRef.current = absoluteOffset;
+      setSpeechProgress(Math.min(100, Math.round((absoluteOffset / articleText.length) * 100)));
+    };
+    utterance.onend = () => {
+      if (speechSessionRef.current !== session) return;
+      speechOffsetRef.current = articleText.length;
+      setSpeaking(false);
+      setSpeechProgress(100);
+    };
+    utterance.onerror = () => {
+      if (speechSessionRef.current === session) setSpeaking(false);
+    };
     utteranceRef.current = utterance;
     window.speechSynthesis.speak(utterance);
     setSpeaking(true);
+  };
+
+  const playSpeech = () => {
+    if (speaking) {
+      stopSpeech(false);
+      return;
+    }
+    speakFromOffset(speechProgress >= 100 ? 0 : speechOffsetRef.current);
+  };
+
+  const changeVoice = (nextVoice: string) => {
+    setVoiceName(nextVoice);
+    if (!speaking) return;
+    speakFromOffset(speechOffsetRef.current, nextVoice);
   };
 
   const downloadOriginal = () => {
@@ -429,8 +485,11 @@ export default function Home() {
       const result = await response.json() as ({ document_id?: string } & Omit<ReaderDocument, "documentId"> & { message?: string });
       if (!response.ok || !result.document_id || !result.sections) throw new Error(result.message || "无法打开阅读页。");
       const { document_id, ...reader } = result;
+      window.speechSynthesis?.cancel();
+      setSpeaking(false);
+      setSpeechProgress(0);
       setReaderDocument({ ...reader, documentId: document_id });
-      setSourceType(item.source_type);
+      setSourceType(item.source_type === "upload" ? "file" : "url");
       setSelectedFile(null);
       setSearchHits([]);
       setView("reader");
@@ -515,9 +574,10 @@ export default function Home() {
   );
 
   const renderProcessing = () => {
-    const steps = [
-      { label: "网址校验", at: 8 }, { label: "服务端抓取", at: 24 }, { label: "正文提取", at: 48 }, { label: "结构化", at: 68 }, { label: "生成阅读页", at: 82 }, { label: "完成", at: 96 },
-    ];
+    const isUrlImport = sourceType === "url";
+    const steps = isUrlImport
+      ? [{ label: "网址校验", at: 8 }, { label: "服务端抓取", at: 24 }, { label: "正文提取", at: 48 }, { label: "结构化", at: 68 }, { label: "生成阅读页", at: 82 }, { label: "完成", at: 96 }]
+      : [{ label: "文件校验", at: 8 }, { label: "安全保存", at: 24 }, { label: "文档解析", at: 48 }, { label: "结构化", at: 68 }, { label: "生成 H5", at: 82 }, { label: "完成", at: 96 }];
     return (
       <main className="processing-page">
         <button className="back-link" onClick={() => setView("create")}>← 返回导入</button>
@@ -525,12 +585,12 @@ export default function Home() {
           <div className="processing-animation"><span className="doc-sheet"><i /><i /><i /></span><span className="pulse-ring ring-one" /><span className="pulse-ring ring-two" /></div>
           <p className="overline">正在转换</p>
           <h1>{processingName}</h1>
-          <p>{processingError ? "未生成任何替代内容" : sourceType === "url" ? "正在读取目标网站并提取真实正文" : "正在安全保存原文件并提取文档结构"}</p>
+          <p>{processingError ? "未生成任何替代内容" : isUrlImport ? "正在读取目标网站并提取真实正文" : "正在解析上传文件并生成可朗读 H5"}</p>
           {processingError ? (
-            <div className="processing-error" role="alert"><strong>网页抓取失败</strong><p>{processingError}</p><button className="primary-button" onClick={() => setView("create")}>返回修改网址</button></div>
+            <div className="processing-error" role="alert"><strong>{isUrlImport ? "网页抓取失败" : "文档解析失败"}</strong><p>{processingError}</p><button className="primary-button" onClick={() => setView("create")}>{isUrlImport ? "返回修改网址" : "返回重新选择文件"}</button></div>
           ) : <>
             <div className="big-progress"><span style={{ width: `${progress}%` }} /></div>
-            <div className="progress-meta"><strong>{progress}%</strong><span>{progress === 100 ? "正在打开阅读页" : "正在等待目标网站响应"}</span></div>
+            <div className="progress-meta"><strong>{progress}%</strong><span>{progress === 100 ? "正在打开阅读页" : isUrlImport ? "正在等待目标网站响应" : "正在提取文档文字与结构"}</span></div>
             <div className="pipeline-steps">{steps.map((step) => <div key={step.label} className={progress >= step.at ? "done" : progress + 16 >= step.at ? "current" : ""}><span>{progress >= step.at ? "✓" : ""}</span><small>{step.label}</small></div>)}</div>
           </>}
         </section>
@@ -542,14 +602,14 @@ export default function Home() {
   const renderReader = () => (
     <main className="reader-page">
       <aside className="reader-outline">
-        <button className="back-link" onClick={() => { window.speechSynthesis?.cancel(); setSpeaking(false); setView("create"); }}>← 返回</button>
+        <button className="back-link" onClick={() => { stopSpeech(false); setView("create"); }}>← 返回</button>
         <div className="outline-file"><span className="pdf-tile">{selectedFile?.name.split(".").pop()?.toUpperCase() || (readerDocument.sourceUrl ? "URL" : "DEMO")}</span><div><strong>{readerDocument.title}</strong><small>{readerDocument.sections.length} 章 · 约 {Math.max(1, Math.ceil(readerDocument.wordCount / 350))} 分钟</small></div></div>
         <p className="outline-title">文章目录</p>
         <nav>{readerDocument.sections.map((section, index) => <a key={section.id} href={`#${section.id}`}><span>{String(index + 1).padStart(2, "0")}</span>{section.title}</a>)}</nav>
         <div className="private-note"><AppIcon name={readerDocument.engine === "demo" ? "book" : "check"} /><span><strong>{readerDocument.engine === "demo" ? "明确标记的阅读示例" : "已保存到个人知识库"}</strong><small>{readerDocument.engine === "crawl4ai" ? "Crawl4AI 处理" : readerDocument.engine === "document-processor" ? "DOCX / PDF / XLSX / MD 解析" : readerDocument.engine === "demo" ? "不代表用户文件或网页" : "服务端 HTML 正文提取"}</small></span></div>
       </aside>
       <article className="reader-article">
-        <div className="article-meta"><span>{readerDocument.siteName}</span><span>·</span><span>{readerDocument.engine === "demo" ? "阅读示例" : "实时网页抓取"}</span>{readerDocument.sourceUrl && <><span>·</span><a href={readerDocument.sourceUrl} target="_blank" rel="noreferrer">查看原网页 ↗</a></>}</div>
+        <div className="article-meta"><span>{readerDocument.siteName}</span><span>·</span><span>{readerDocument.engine === "demo" ? "阅读示例" : readerDocument.engine === "document-processor" ? "已解析上传文件" : "实时网页抓取"}</span>{readerDocument.sourceUrl && <><span>·</span><a href={readerDocument.sourceUrl} target="_blank" rel="noreferrer">查看原网页 ↗</a></>}</div>
         <h1>{readerDocument.title}</h1>
         <p className="article-deck">{readerDocument.description}</p>
         <div className="article-rule" />
@@ -580,7 +640,7 @@ export default function Home() {
       <div className="tts-player">
         <button className="play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
         <div className="track-info"><div><strong>{speaking ? "正在朗读 · " : "准备就绪 · "}01</strong><span>{readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className="audio-progress"><span style={{ width: `${speechProgress}%` }} /></div></div>
-        <div className="voice-select"><label htmlFor="voice">音色</label><select id="voice" value={voiceName} onChange={(event) => setVoiceName(event.target.value)}>{voices.length ? voices.slice(0, 12).map((voice) => <option key={`${voice.name}-${voice.lang}`} value={voice.name}>{voice.name} · {voice.lang}</option>) : <option>系统默认音色</option>}</select></div>
+        <div className="voice-select"><label htmlFor="voice">音色</label><select id="voice" value={voiceName} onChange={(event) => changeVoice(event.target.value)}>{voices.length ? voices.slice(0, 12).map((voice) => <option key={`${voice.name}-${voice.lang}`} value={voice.name}>{voice.name} · {voice.lang}</option>) : <option>系统默认音色</option>}</select></div>
         <span className="speed-pill">1.0×</span>
       </div>
       {notice && <button className="toast" onClick={() => setNotice("")} aria-label="关闭提示">{notice}<span>×</span></button>}
@@ -602,6 +662,19 @@ export default function Home() {
       })}</div>
       {!libraryLoading && !storedDocuments.length && <div className="library-empty"><strong>还没有已保存的资料</strong><p>从网址或 DOCX、MD、PDF、XLSX 导入后，它会在这里形成个人知识索引。</p><button className="primary-button" onClick={() => setView("create")}>开始导入</button></div>}
       <div className="tenant-banner"><AppIcon name="lock" /><div><strong>你的知识，只属于你</strong><p>平台在数据库、对象存储和检索服务三层强制执行用户与租户隔离。</p></div><span>当前用户 · 私有</span></div>
+    </main>
+  );
+
+  const renderHistory = () => (
+    <main className="library-page history-page">
+      <div className="page-heading"><div><p className="overline">处理中心</p><h1>处理记录</h1><p>查看每次网址抓取或文档解析的状态；已完成的资料可直接打开阅读。</p></div><button className="primary-button" onClick={() => setView("create")}><AppIcon name="plus" />导入新资料</button></div>
+      {libraryError && <p className="field-error library-error" role="alert">{libraryError}</p>}
+      {libraryLoading ? <div className="history-empty">正在读取处理记录…</div> : storedDocuments.length ? <section className="history-list" aria-label="处理记录列表">{storedDocuments.map((item) => {
+        const type = item.filename?.split(".").pop()?.toUpperCase() || (item.source_type === "url" ? "URL" : "DOC");
+        const statusText = item.status === "ready" ? "已完成" : item.status === "failed" ? "处理失败" : item.status === "parsing" ? "正在解析" : "等待处理";
+        return <button key={item.id} className="history-item" onClick={() => void openStoredDocument(item)}><span className={`history-status ${item.status}`}>{statusText}</span><div><strong>{item.title}</strong><small>{type} · {item.source_type === "url" ? item.source_url : item.filename || "上传文件"}</small></div><span>{new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(item.updated_at))}</span><b>{item.status === "ready" ? "打开阅读页 →" : "查看详情"}</b></button>;
+      })}</section> : <div className="history-empty"><strong>暂时没有处理记录</strong><p>导入 DOCX、PDF、XLSX、Markdown 或网页链接后，状态会显示在这里。</p><button className="primary-button" onClick={() => setView("create")}>开始导入</button></div>}
+      <div className="tenant-banner"><AppIcon name="lock" /><div><strong>记录和资料均为私有</strong><p>当前列表只返回属于当前用户与租户的处理任务。</p></div><span>当前用户 · 私有</span></div>
     </main>
   );
 
@@ -633,7 +706,7 @@ export default function Home() {
         <nav aria-label="主导航">
           <button className={view === "create" || view === "processing" || view === "reader" ? "active" : ""} onClick={() => setView("create")}><AppIcon name="plus" />创建阅读</button>
           <button className={view === "library" ? "active" : ""} onClick={openLibrary}><AppIcon name="book" />我的知识库</button>
-          <button onClick={openLibrary}><AppIcon name="clock" />处理记录</button>
+          <button className={view === "history" ? "active" : ""} onClick={openHistory}><AppIcon name="clock" />处理记录</button>
           <button className={view === "api" ? "active" : ""} onClick={() => setView("api")}><AppIcon name="code" />API 文档</button>
         </nav>
         <div className="header-actions"><button className="demo-link" onClick={() => { setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button><button className="avatar" aria-label="用户菜单">MK<span /></button></div>
@@ -642,6 +715,7 @@ export default function Home() {
       {view === "processing" && renderProcessing()}
       {view === "reader" && renderReader()}
       {view === "library" && renderLibrary()}
+      {view === "history" && renderHistory()}
       {view === "api" && renderApi()}
       {view === "create" && <footer><span>© 2026 声阅</span><span>隐私保护 · 数据安全 · 服务状态</span><span><i /> 全部系统正常</span></footer>}
     </div>

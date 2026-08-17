@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 interface ReaderSection {
   id: string;
@@ -28,6 +28,8 @@ export default function SharedReader({ shareId }: { shareId: string }) {
   const [voiceName, setVoiceName] = useState("");
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [speaking, setSpeaking] = useState(false);
+  const speechOffsetRef = useRef(0);
+  const speechSessionRef = useRef(0);
 
   const articleText = useMemo(
     () => document ? [document.title, document.description, ...document.sections.flatMap((section) => [section.title, ...section.paragraphs])].join("。") : "",
@@ -63,21 +65,35 @@ export default function SharedReader({ shareId }: { shareId: string }) {
 
   useEffect(() => () => window.speechSynthesis?.cancel(), []);
 
-  const playSpeech = () => {
+  const speakFromOffset = (requestedOffset: number, selectedVoice = voiceName) => {
     if (!("speechSynthesis" in window) || !articleText) return;
+    const offset = requestedOffset >= articleText.length ? 0 : Math.max(0, requestedOffset);
+    const session = speechSessionRef.current + 1;
+    speechSessionRef.current = session;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(articleText.slice(offset));
+    utterance.lang = "zh-CN";
+    utterance.voice = voices.find((voice) => voice.name === selectedVoice) || null;
+    utterance.onboundary = (event) => { if (speechSessionRef.current === session) speechOffsetRef.current = Math.min(articleText.length, offset + event.charIndex); };
+    utterance.onend = () => { if (speechSessionRef.current === session) { speechOffsetRef.current = articleText.length; setSpeaking(false); } };
+    utterance.onerror = () => { if (speechSessionRef.current === session) setSpeaking(false); };
+    window.speechSynthesis.speak(utterance);
+    setSpeaking(true);
+  };
+
+  const playSpeech = () => {
     if (speaking) {
+      speechSessionRef.current += 1;
       window.speechSynthesis.cancel();
       setSpeaking(false);
       return;
     }
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(articleText);
-    utterance.lang = "zh-CN";
-    utterance.voice = voices.find((voice) => voice.name === voiceName) || null;
-    utterance.onend = () => setSpeaking(false);
-    utterance.onerror = () => setSpeaking(false);
-    window.speechSynthesis.speak(utterance);
-    setSpeaking(true);
+    speakFromOffset(speechOffsetRef.current);
+  };
+
+  const changeVoice = (nextVoice: string) => {
+    setVoiceName(nextVoice);
+    if (speaking) speakFromOffset(speechOffsetRef.current, nextVoice);
   };
 
   const downloadH5 = () => window.location.assign(`/v1/public/shares/${encodeURIComponent(shareId)}/artifacts/h5`);
@@ -94,7 +110,7 @@ export default function SharedReader({ shareId }: { shareId: string }) {
         <p className="shared-reader-deck">{document.description}</p>
         {document.sections.map((section) => <section key={section.id}><p className="shared-section-eyebrow">{section.eyebrow}</p><h2>{section.title}</h2>{section.paragraphs.map((paragraph, index) => <p key={`${section.id}-${index}`}>{paragraph}</p>)}</section>)}
       </article>
-      <div className="shared-reader-player"><button onClick={playSpeech}>{speaking ? "Ⅱ 停止朗读" : "▶ 开始朗读"}</button><label>音色<select value={voiceName} onChange={(event) => setVoiceName(event.target.value)}>{voices.length ? voices.slice(0, 12).map((voice) => <option key={`${voice.name}-${voice.lang}`} value={voice.name}>{voice.name} · {voice.lang}</option>) : <option>系统默认音色</option>}</select></label>{allowDownload && <button className="shared-download" onClick={downloadH5}>↓ 下载 H5</button>}</div>
+      <div className="shared-reader-player"><button onClick={playSpeech}>{speaking ? "Ⅱ 停止朗读" : "▶ 开始朗读"}</button><label>音色<select value={voiceName} onChange={(event) => changeVoice(event.target.value)}>{voices.length ? voices.slice(0, 12).map((voice) => <option key={`${voice.name}-${voice.lang}`} value={voice.name}>{voice.name} · {voice.lang}</option>) : <option>系统默认音色</option>}</select></label>{allowDownload && <button className="shared-download" onClick={downloadH5}>↓ 下载 H5</button>}</div>
     </main>
   );
 }

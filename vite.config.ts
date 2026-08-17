@@ -31,6 +31,11 @@ const localBindingConfig = {
         },
       ]
     : [],
+  vars: {
+    // Local parser service only. Hosted deployments must use the private
+    // CUSTOMER_HTTP_DOCUMENT_PROCESSOR binding instead of an HTTP URL.
+    LOCAL_DOCUMENT_PROCESSOR_URL: "http://127.0.0.1:8765",
+  },
 };
 
 export default defineConfig(async () => {

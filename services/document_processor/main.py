@@ -10,6 +10,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import fitz
 from docx import Document
@@ -72,7 +73,7 @@ def markdown_sections(text: str) -> list[dict[str, Any]]:
 
 def parse_docx(blob: bytes) -> tuple[str, list[dict[str, Any]]]:
     document = Document(BytesIO(blob))
-    title = clean(document.core_properties.title) or "DOCX 文档"
+    title = clean(document.core_properties.title)
     groups: list[tuple[str, list[str]]] = []
     current_title, current_paragraphs = "正文", []
     for paragraph in document.paragraphs:
@@ -100,7 +101,7 @@ def parse_docx(blob: bytes) -> tuple[str, list[dict[str, Any]]]:
 
 def parse_pdf(blob: bytes) -> tuple[str, list[dict[str, Any]]]:
     pdf = fitz.open(stream=blob, filetype="pdf")
-    title = clean(pdf.metadata.get("title")) or "PDF 文档"
+    title = clean(pdf.metadata.get("title"))
     sections: list[dict[str, Any]] = []
     total_chars = 0
     for page_index, page in enumerate(pdf, start=1):
@@ -162,7 +163,7 @@ async def healthz() -> dict[str, str]:
 
 @app.post("/v1/parse")
 async def parse(request: Request) -> dict[str, Any]:
-    filename = request.headers.get("x-source-filename", "").strip()
+    filename = unquote(request.headers.get("x-source-filename", "").strip())
     extension = Path(filename).suffix.lower()
     if extension not in {".docx", ".md", ".pdf", ".xlsx"}:
         raise HTTPException(status_code=422, detail="仅支持 DOCX、MD、PDF、XLSX")
@@ -178,7 +179,8 @@ async def parse(request: Request) -> dict[str, Any]:
             title, sections = parse_pdf(blob)
         else:
             title, sections = parse_xlsx(blob)
-        return {"document": reader_document(title, filename, sections)}
+        fallback_title = Path(filename).stem
+        return {"document": reader_document(title or fallback_title, filename, sections)}
     except HTTPException:
         raise
     except Exception as error:

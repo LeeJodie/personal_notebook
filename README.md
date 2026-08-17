@@ -28,7 +28,7 @@ npm test
 ## 体验范围
 
 - URL 导入：抓取真实网页正文，持久化生成阅读页、H5、知识分块，支持浏览器 TTS 与下载。
-- 文件：Markdown 可在本地直接完成保存、解析、H5 生成和检索；DOCX、PDF、XLSX 需启动 document-processor 并配置私有绑定后可完成同一链路。
+- 文件：Markdown 可在本地直接完成保存、解析、H5 生成和检索；DOCX、PDF、XLSX 在本地先运行 `npm run dev:processor`，再运行 `npm run dev`，即可完成同一链路。生产环境应配置 document-processor 私有绑定。
 - 分享：资料所有者可生成带有效期与 H5 下载权限的链接，并可立即撤销。链接 token 只存哈希，不会写入数据库明文。
 - 检索：默认使用用户隔离的 D1 关键词分块检索；部署 [`services/knowledge_index`](services/knowledge_index) 并配置私有绑定后，自动切换到 FastEmbed + Qdrant 语义召回。
 
