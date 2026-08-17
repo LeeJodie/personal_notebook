@@ -13,17 +13,41 @@ interface ReaderSection {
 }
 
 interface ReaderDocument {
+  documentId?: string;
   title: string;
   description: string;
   sourceUrl: string;
   siteName: string;
   fetchedAt: string;
   wordCount: number;
-  engine: "demo" | "crawl4ai" | "server-html-extractor";
+  engine: "demo" | "crawl4ai" | "server-html-extractor" | "document-processor";
   sections: ReaderSection[];
 }
 
-const supportedExtensions = ["DOCX", "DOC", "MD", "XLSX", "XLS", "PPTX", "PPT", "PDF"];
+interface StoredDocument {
+  id: string;
+  title: string;
+  source_type: "upload" | "url";
+  source_url: string | null;
+  filename: string | null;
+  media_type: string | null;
+  size_bytes: number | null;
+  status: "queued" | "parsing" | "ready" | "failed" | "deleting";
+  progress: number;
+  word_count: number;
+  updated_at: string;
+  error_message: string | null;
+}
+
+interface SearchHit {
+  document_id: string;
+  document_title: string;
+  chunk_id: string;
+  text: string;
+  heading_path: string[];
+}
+
+const supportedExtensions = ["DOCX", "MD", "XLSX", "PDF"];
 
 const demoDocument: ReaderDocument = {
   title: "智能阅读项目建设方案",
@@ -64,13 +88,6 @@ const demoDocument: ReaderDocument = {
   ],
 };
 
-const libraryItems = [
-  { name: "2026 年产品战略与路线图", type: "PPTX", size: "18.6 MB", chunks: 126, time: "8 分钟前", color: "coral" },
-  { name: "智能阅读项目建设方案", type: "PDF", size: "4.2 MB", chunks: 84, time: "昨天 16:42", color: "blue" },
-  { name: "客户访谈洞察整理", type: "DOCX", size: "2.8 MB", chunks: 51, time: "8 月 12 日", color: "green" },
-  { name: "运营核心指标追踪", type: "XLSX", size: "7.1 MB", chunks: 38, time: "8 月 10 日", color: "amber" },
-];
-
 function Wordmark() {
   return (
     <div className="wordmark" aria-label="声阅">
@@ -109,16 +126,21 @@ export default function Home() {
   const [notice, setNotice] = useState("");
   const [readerDocument, setReaderDocument] = useState<ReaderDocument>(demoDocument);
   const [isCrawling, setIsCrawling] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [processingError, setProcessingError] = useState("");
   const [shareLink, setShareLink] = useState("");
   const [shareId, setShareId] = useState("");
-  const [shareRevokeToken, setShareRevokeToken] = useState("");
   const [shareExpiresAt, setShareExpiresAt] = useState("");
   const [shareTtlHours, setShareTtlHours] = useState(168);
   const [shareAllowDownload, setShareAllowDownload] = useState(true);
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
   const [shareError, setShareError] = useState("");
+  const [storedDocuments, setStoredDocuments] = useState<StoredDocument[]>([]);
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
@@ -152,8 +174,53 @@ export default function Home() {
 
   useEffect(() => () => window.speechSynthesis?.cancel(), []);
 
-  const startProcessing = (name: string) => {
-    setNotice(`已选择「${name}」。当前体验站尚未连接 Office/PDF 解析服务，不会使用示例正文冒充文件内容。`);
+  const loadLibrary = async () => {
+    setLibraryLoading(true);
+    setLibraryError("");
+    try {
+      const response = await fetch("/v1/documents");
+      const result = await response.json() as { items?: StoredDocument[]; message?: string };
+      if (!response.ok || !Array.isArray(result.items)) throw new Error(result.message || "知识库加载失败。");
+      setStoredDocuments(result.items);
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : "知识库加载失败。");
+    } finally {
+      setLibraryLoading(false);
+    }
+  };
+
+  const openLibrary = () => {
+    setView("library");
+    void loadLibrary();
+  };
+
+  const startProcessing = async () => {
+    if (!selectedFile || isUploading) return;
+    setSourceType("file");
+    setProcessingName(selectedFile.name);
+    setProcessingError("");
+    setNotice("");
+    setProgress(12);
+    setIsUploading(true);
+    setView("processing");
+    try {
+      const form = new FormData();
+      form.append("file", selectedFile);
+      const response = await fetch("/v1/documents:upload", { method: "POST", body: form });
+      const result = await response.json() as { document?: { id?: string; error_message?: string }; reader?: Omit<ReaderDocument, "documentId"> | null; message?: string };
+      if (!response.ok || !result.document?.id || !result.reader) {
+        throw new Error(result.document?.error_message || result.message || "文档转换失败。");
+      }
+      setReaderDocument({ ...result.reader, documentId: result.document.id });
+      setProcessingName(result.reader.title);
+      setProgress(100);
+      window.setTimeout(() => setView("reader"), 450);
+    } catch (error) {
+      setProcessingError(error instanceof Error ? error.message : "文档上传或转换失败。");
+      setProgress((current) => Math.min(current, 88));
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const submitUrl = async () => {
@@ -178,17 +245,17 @@ export default function Home() {
     setIsCrawling(true);
     setView("processing");
     try {
-      const response = await fetch("/api/crawl", {
+      const response = await fetch("/v1/documents:import-url", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ url: parsed.toString() }),
       });
-      const result = await response.json() as Partial<ReaderDocument> & { message?: string };
-      if (!response.ok) throw new Error(result.message || `抓取服务返回 ${response.status}`);
-      if (!result.title || !result.description || !Array.isArray(result.sections) || result.sections.length === 0) {
+      const result = await response.json() as { document?: { id?: string; error_message?: string }; reader?: Omit<ReaderDocument, "documentId"> | null; message?: string };
+      if (!response.ok) throw new Error(result.document?.error_message || result.message || `抓取服务返回 ${response.status}`);
+      if (!result.document?.id || !result.reader || !result.reader.title || !result.reader.description || !Array.isArray(result.reader.sections) || result.reader.sections.length === 0) {
         throw new Error("抓取成功，但结果中没有可阅读正文。");
       }
-      const document = result as ReaderDocument;
+      const document = { ...result.reader, documentId: result.document.id } as ReaderDocument;
       setReaderDocument(document);
       setProcessingName(document.title);
       setProgress(100);
@@ -205,7 +272,7 @@ export default function Home() {
     if (!file) return;
     const ext = file.name.split(".").pop()?.toUpperCase() || "";
     if (!supportedExtensions.includes(ext)) {
-      setNotice("暂不支持该文件类型，请上传 DOCX、PDF、PPTX、Excel 或 Markdown。");
+      setNotice("当前已接入 DOCX、PDF、XLSX 和 Markdown；DOC、PPT/PPTX 将在下一阶段接入。");
       return;
     }
     setSelectedFile(file);
@@ -242,6 +309,10 @@ export default function Home() {
   };
 
   const downloadOriginal = () => {
+    if (readerDocument.documentId && sourceType !== "url") {
+      window.open(`/v1/documents/${readerDocument.documentId}/artifacts/original`, "_blank", "noopener,noreferrer");
+      return;
+    }
     if (sourceType === "url" && readerDocument.sourceUrl) {
       window.open(readerDocument.sourceUrl, "_blank", "noopener,noreferrer");
       return;
@@ -259,6 +330,11 @@ export default function Home() {
   };
 
   const exportH5 = () => {
+    if (readerDocument.documentId) {
+      window.open(`/v1/documents/${readerDocument.documentId}/artifacts/h5`, "_blank", "noopener,noreferrer");
+      setNotice("正在下载已保存的 H5 阅读页。");
+      return;
+    }
     const sections = readerDocument.sections.map((section) => `<section><p class="eyebrow">${escapeHtml(section.eyebrow)}</p><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
     const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(readerDocument.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button,.player select{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p><h1>${escapeHtml(readerDocument.title)}</h1><p class="deck">${escapeHtml(readerDocument.description)}</p>${sections}</main><div class="player"><button id="play">▶ 开始播放</button><select id="voices" aria-label="选择音色"></select></div><script>const text=document.querySelector('main').innerText,v=document.querySelector('#voices'),b=document.querySelector('#play');function load(){const a=speechSynthesis.getVoices();v.innerHTML=a.map((x,i)=>'<option value="'+i+'">'+x.name+' · '+x.lang+'</option>').join('');}load();speechSynthesis.onvoiceschanged=load;b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text),a=speechSynthesis.getVoices();u.voice=a[v.value]||null;u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
@@ -282,28 +358,30 @@ export default function Home() {
 
   const createShare = async () => {
     if (isSharing) return;
+    if (!readerDocument.documentId) {
+      setShareError("请先导入网址或文件后再创建持久化分享链接。");
+      return;
+    }
     setIsSharing(true);
     setShareError("");
     try {
-      const response = await fetch("/api/shares", {
+      const response = await fetch(`/v1/documents/${readerDocument.documentId}/shares`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          document: readerDocument,
           expires_in_hours: shareTtlHours,
           allow_download: shareAllowDownload,
         }),
       });
       const result = await response.json() as {
-        id?: string; share_url?: string; expires_at?: string; revoke_token?: string; message?: string;
+        id?: string; share_url?: string; expires_at?: string; message?: string;
       };
-      if (!response.ok || !result.id || !result.share_url || !result.revoke_token) {
+      if (!response.ok || !result.id || !result.share_url) {
         throw new Error(result.message || "分享链接生成失败。");
       }
       setShareId(result.id);
       setShareLink(result.share_url);
       setShareExpiresAt(result.expires_at || "");
-      setShareRevokeToken(result.revoke_token);
       await copyToClipboard(result.share_url, "分享链接已复制，可直接转发给他人。");
     } catch (error) {
       setShareError(error instanceof Error ? error.message : "分享链接生成失败。");
@@ -326,20 +404,62 @@ export default function Home() {
   };
 
   const revokeShare = async () => {
-    if (!shareId || !shareRevokeToken) return;
+    if (!shareId || !readerDocument.documentId) return;
     try {
-      const response = await fetch(`/api/shares/${shareId}`, {
+      const response = await fetch(`/v1/documents/${readerDocument.documentId}/shares/${shareId}`, {
         method: "DELETE",
-        headers: { "x-share-revoke-token": shareRevokeToken },
       });
       if (!response.ok) throw new Error("关闭分享失败，请稍后重试。");
       setShareLink("");
       setShareId("");
-      setShareRevokeToken("");
       setShareExpiresAt("");
       setNotice("分享链接已关闭，访问者将无法继续打开。 ");
     } catch (error) {
       setShareError(error instanceof Error ? error.message : "关闭分享失败。");
+    }
+  };
+
+  const openStoredDocument = async (item: StoredDocument) => {
+    if (item.status !== "ready") {
+      setLibraryError(item.error_message || "该文档仍在处理中，请稍后再试。");
+      return;
+    }
+    try {
+      const response = await fetch(`/v1/documents/${item.id}/reader`);
+      const result = await response.json() as ({ document_id?: string } & Omit<ReaderDocument, "documentId"> & { message?: string });
+      if (!response.ok || !result.document_id || !result.sections) throw new Error(result.message || "无法打开阅读页。");
+      const { document_id, ...reader } = result;
+      setReaderDocument({ ...reader, documentId: document_id });
+      setSourceType(item.source_type);
+      setSelectedFile(null);
+      setSearchHits([]);
+      setView("reader");
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : "无法打开阅读页。");
+    }
+  };
+
+  const searchLibrary = async () => {
+    const query = libraryQuery.trim();
+    if (!query) {
+      setSearchHits([]);
+      return;
+    }
+    setLibraryLoading(true);
+    setLibraryError("");
+    try {
+      const response = await fetch("/v1/knowledge/search", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query, limit: 10 }),
+      });
+      const result = await response.json() as { items?: SearchHit[]; message?: string };
+      if (!response.ok || !Array.isArray(result.items)) throw new Error(result.message || "知识库检索失败。");
+      setSearchHits(result.items);
+    } catch (error) {
+      setLibraryError(error instanceof Error ? error.message : "知识库检索失败。");
+    } finally {
+      setLibraryLoading(false);
     }
   };
 
@@ -359,11 +479,11 @@ export default function Home() {
 
         {sourceType === "file" ? (
           <div className={`drop-zone ${dragging ? "dragging" : ""} ${selectedFile ? "has-file" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
-            <input ref={fileInput} type="file" accept=".doc,.docx,.md,.xls,.xlsx,.ppt,.pptx,.pdf" onChange={(event) => acceptFile(event.target.files?.[0])} />
+            <input ref={fileInput} type="file" accept=".docx,.md,.xlsx,.pdf" onChange={(event) => acceptFile(event.target.files?.[0])} />
             {selectedFile ? (
               <>
                 <div className="file-ready"><span className="file-badge">{selectedFile.name.split(".").pop()?.toUpperCase()}</span><div><strong>{selectedFile.name}</strong><small>{(selectedFile.size / 1024 / 1024).toFixed(1)} MB · 已就绪</small></div><AppIcon name="check" /></div>
-                <div className="ready-actions"><button className="text-button" onClick={() => fileInput.current?.click()}>更换文件</button><button className="primary-button" onClick={() => startProcessing(selectedFile.name)}>开始转换 <span>→</span></button></div>
+                <div className="ready-actions"><button className="text-button" onClick={() => fileInput.current?.click()}>更换文件</button><button className="primary-button" onClick={() => void startProcessing()} disabled={isUploading}>开始转换 <span>→</span></button></div>
               </>
             ) : (
               <>
@@ -405,7 +525,7 @@ export default function Home() {
           <div className="processing-animation"><span className="doc-sheet"><i /><i /><i /></span><span className="pulse-ring ring-one" /><span className="pulse-ring ring-two" /></div>
           <p className="overline">正在转换</p>
           <h1>{processingName}</h1>
-          <p>{processingError ? "未生成任何替代内容" : "正在读取目标网站并提取真实正文"}</p>
+          <p>{processingError ? "未生成任何替代内容" : sourceType === "url" ? "正在读取目标网站并提取真实正文" : "正在安全保存原文件并提取文档结构"}</p>
           {processingError ? (
             <div className="processing-error" role="alert"><strong>网页抓取失败</strong><p>{processingError}</p><button className="primary-button" onClick={() => setView("create")}>返回修改网址</button></div>
           ) : <>
@@ -414,7 +534,7 @@ export default function Home() {
             <div className="pipeline-steps">{steps.map((step) => <div key={step.label} className={progress >= step.at ? "done" : progress + 16 >= step.at ? "current" : ""}><span>{progress >= step.at ? "✓" : ""}</span><small>{step.label}</small></div>)}</div>
           </>}
         </section>
-        <p className="processing-tip">阅读页、TTS 与 H5 导出将共用这次真实抓取的内容</p>
+        <p className="processing-tip">阅读页、TTS、H5、知识索引与分享链接将共用同一份结构化内容</p>
       </main>
     );
   };
@@ -426,7 +546,7 @@ export default function Home() {
         <div className="outline-file"><span className="pdf-tile">{selectedFile?.name.split(".").pop()?.toUpperCase() || (readerDocument.sourceUrl ? "URL" : "DEMO")}</span><div><strong>{readerDocument.title}</strong><small>{readerDocument.sections.length} 章 · 约 {Math.max(1, Math.ceil(readerDocument.wordCount / 350))} 分钟</small></div></div>
         <p className="outline-title">文章目录</p>
         <nav>{readerDocument.sections.map((section, index) => <a key={section.id} href={`#${section.id}`}><span>{String(index + 1).padStart(2, "0")}</span>{section.title}</a>)}</nav>
-        <div className="private-note"><AppIcon name={readerDocument.engine === "demo" ? "book" : "check"} /><span><strong>{readerDocument.engine === "demo" ? "明确标记的阅读示例" : "已使用真实抓取结果"}</strong><small>{readerDocument.engine === "crawl4ai" ? "Crawl4AI 处理" : readerDocument.engine === "demo" ? "不代表用户文件或网页" : "服务端 HTML 正文提取"}</small></span></div>
+        <div className="private-note"><AppIcon name={readerDocument.engine === "demo" ? "book" : "check"} /><span><strong>{readerDocument.engine === "demo" ? "明确标记的阅读示例" : "已保存到个人知识库"}</strong><small>{readerDocument.engine === "crawl4ai" ? "Crawl4AI 处理" : readerDocument.engine === "document-processor" ? "DOCX / PDF / XLSX / MD 解析" : readerDocument.engine === "demo" ? "不代表用户文件或网页" : "服务端 HTML 正文提取"}</small></span></div>
       </aside>
       <article className="reader-article">
         <div className="article-meta"><span>{readerDocument.siteName}</span><span>·</span><span>{readerDocument.engine === "demo" ? "阅读示例" : "实时网页抓取"}</span>{readerDocument.sourceUrl && <><span>·</span><a href={readerDocument.sourceUrl} target="_blank" rel="noreferrer">查看原网页 ↗</a></>}</div>
@@ -454,7 +574,7 @@ export default function Home() {
             </>
           )}
           {shareError && <p className="share-error" role="alert">{shareError}</p>}
-          <p className="share-hint">体验环境的链接为临时服务实例保存；正式环境将按文档所有者、有效期和访问策略持久化。</p>
+          <p className="share-hint">分享记录与文档绑定保存，链接可按有效期、下载权限随时撤销。</p>
         </section>}
       </div>
       <div className="tts-player">
@@ -470,10 +590,18 @@ export default function Home() {
   const renderLibrary = () => (
     <main className="library-page">
       <div className="page-heading"><div><p className="overline">个人空间</p><h1>我的知识库</h1><p>你导入的每份资料，都会自动在这里建立私有索引。</p></div><button className="primary-button" onClick={() => setView("create")}><AppIcon name="plus" />导入新资料</button></div>
-      <div className="library-stats"><div><small>已收录资料</small><strong>24</strong><span>本月 +7</span></div><div><small>可检索知识块</small><strong>1,284</strong><span>100% 已索引</span></div><div><small>已转换阅读时长</small><strong>6.8h</strong><span>约节省 4.1h</span></div></div>
-      <div className="library-toolbar"><div className="search-box"><span>⌕</span><input aria-label="搜索知识库" placeholder="搜索文件名、类型或内容…" /></div><button>全部类型 ⌄</button><button>最近更新 ⌄</button></div>
-      <div className="library-grid">{libraryItems.map((item) => <button className="library-card" key={item.name} onClick={() => { setReaderDocument(demoDocument); setSourceType("file"); setProcessingName(demoDocument.title); setView("reader"); }}><div className={`library-cover ${item.color}`}><span>{item.type}</span><i /><i /><i /></div><div className="library-card-body"><span className="indexed"><i /> 已完成索引</span><h2>{item.name}</h2><p>{item.type} · {item.size} · {item.chunks} 个知识块</p><div><span>{item.time}</span><span>打开阅读示例 →</span></div></div></button>)}</div>
-      <div className="tenant-banner"><AppIcon name="lock" /><div><strong>你的知识，只属于你</strong><p>平台在数据库、对象存储和向量检索三层强制执行用户与租户隔离。</p></div><span>tenant_8f3a · 私有</span></div>
+      <div className="library-stats"><div><small>已收录资料</small><strong>{storedDocuments.length}</strong><span>仅当前用户可见</span></div><div><small>可检索知识块</small><strong>{storedDocuments.filter((item) => item.status === "ready").length}</strong><span>资料已建立索引</span></div><div><small>处理状态</small><strong>{storedDocuments.filter((item) => item.status === "ready").length}/{storedDocuments.length}</strong><span>已完成转换</span></div></div>
+      <div className="library-toolbar"><div className="search-box"><span>⌕</span><input aria-label="搜索知识库" value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchLibrary()} placeholder="搜索文件名或资料正文…" /></div><button onClick={() => void searchLibrary()}>检索</button><button onClick={() => { setLibraryQuery(""); setSearchHits([]); void loadLibrary(); }}>刷新</button></div>
+      {libraryError && <p className="field-error library-error" role="alert">{libraryError}</p>}
+      {searchHits.length > 0 && <section className="search-results" aria-label="知识检索结果"><p>找到 {searchHits.length} 条相关内容</p>{searchHits.map((hit) => <button key={hit.chunk_id} onClick={() => { const item = storedDocuments.find((document) => document.id === hit.document_id); if (item) void openStoredDocument(item); }}><strong>{hit.document_title}</strong><span>{hit.heading_path.join(" / ")}</span><small>{hit.text}</small></button>)}</section>}
+      <div className="library-grid">{storedDocuments.map((item, index) => {
+        const type = item.filename?.split(".").pop()?.toUpperCase() || (item.source_type === "url" ? "URL" : "DOC");
+        const color = ["coral", "blue", "green", "amber"][index % 4];
+        const size = item.size_bytes ? `${(item.size_bytes / 1024 / 1024).toFixed(1)} MB` : "网页导入";
+        return <button className="library-card" key={item.id} onClick={() => void openStoredDocument(item)}><div className={`library-cover ${color}`}><span>{type}</span><i /><i /><i /></div><div className="library-card-body"><span className="indexed"><i /> {item.status === "ready" ? "已完成索引" : item.status === "failed" ? "转换失败" : "正在处理"}</span><h2>{item.title}</h2><p>{type} · {size} · {item.word_count.toLocaleString()} 字</p><div><span>{new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(item.updated_at))}</span><span>{item.status === "ready" ? "打开阅读页 →" : "查看状态"}</span></div></div></button>;
+      })}</div>
+      {!libraryLoading && !storedDocuments.length && <div className="library-empty"><strong>还没有已保存的资料</strong><p>从网址或 DOCX、MD、PDF、XLSX 导入后，它会在这里形成个人知识索引。</p><button className="primary-button" onClick={() => setView("create")}>开始导入</button></div>}
+      <div className="tenant-banner"><AppIcon name="lock" /><div><strong>你的知识，只属于你</strong><p>平台在数据库、对象存储和检索服务三层强制执行用户与租户隔离。</p></div><span>当前用户 · 私有</span></div>
     </main>
   );
 
@@ -504,8 +632,8 @@ export default function Home() {
         <button className="brand-button" onClick={() => setView("create")}><Wordmark /></button>
         <nav aria-label="主导航">
           <button className={view === "create" || view === "processing" || view === "reader" ? "active" : ""} onClick={() => setView("create")}><AppIcon name="plus" />创建阅读</button>
-          <button className={view === "library" ? "active" : ""} onClick={() => setView("library")}><AppIcon name="book" />我的知识库</button>
-          <button onClick={() => setView("library")}><AppIcon name="clock" />处理记录</button>
+          <button className={view === "library" ? "active" : ""} onClick={openLibrary}><AppIcon name="book" />我的知识库</button>
+          <button onClick={openLibrary}><AppIcon name="clock" />处理记录</button>
           <button className={view === "api" ? "active" : ""} onClick={() => setView("api")}><AppIcon name="code" />API 文档</button>
         </nav>
         <div className="header-actions"><button className="demo-link" onClick={() => { setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button><button className="avatar" aria-label="用户菜单">MK<span /></button></div>

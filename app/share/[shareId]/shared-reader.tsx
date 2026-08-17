@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 interface ReaderSection {
@@ -16,14 +17,8 @@ interface SharedReaderDocument {
   siteName: string;
   fetchedAt: string;
   wordCount: number;
-  engine: "demo" | "crawl4ai" | "server-html-extractor";
+  engine: "crawl4ai" | "server-html-extractor" | "document-processor";
   sections: ReaderSection[];
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  })[character] || character);
 }
 
 export default function SharedReader({ shareId }: { shareId: string }) {
@@ -42,7 +37,7 @@ export default function SharedReader({ shareId }: { shareId: string }) {
   useEffect(() => {
     const loadShare = async () => {
       try {
-        const response = await fetch(`/api/shares/${encodeURIComponent(shareId)}`);
+        const response = await fetch(`/v1/public/shares/${encodeURIComponent(shareId)}`, { cache: "no-store" });
         const result = await response.json() as { reader?: SharedReaderDocument; allow_download?: boolean; message?: string };
         if (!response.ok || !result.reader) throw new Error(result.message || "无法打开这份分享。");
         setDocument(result.reader);
@@ -85,24 +80,14 @@ export default function SharedReader({ shareId }: { shareId: string }) {
     setSpeaking(true);
   };
 
-  const downloadH5 = () => {
-    if (!document) return;
-    const sections = document.sections.map((section) => `<section><p class="eyebrow">${escapeHtml(section.eyebrow)}</p><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(document.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 120px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}</style></head><body><main><p class="eyebrow">声阅 · 分享阅读</p><h1>${escapeHtml(document.title)}</h1><p class="deck">${escapeHtml(document.description)}</p>${sections}</main></body></html>`;
-    const href = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
-    const link = window.document.createElement("a");
-    link.href = href;
-    link.download = `${document.title.replace(/[\\/:*?"<>|]/g, "-").slice(0, 80) || "声阅阅读页"}.html`;
-    link.click();
-    URL.revokeObjectURL(href);
-  };
+  const downloadH5 = () => window.location.assign(`/v1/public/shares/${encodeURIComponent(shareId)}/artifacts/h5`);
 
   if (error) return <main className="share-status-page"><p className="share-brand">声阅</p><h1>这份分享无法打开</h1><p>{error}</p></main>;
   if (!document) return <main className="share-status-page"><p className="share-brand">声阅</p><h1>正在打开阅读页…</h1></main>;
 
   return (
     <main className="shared-reader-page">
-      <header className="shared-reader-header"><a href="/" className="share-brand">声阅</a><span>分享阅读页 · 仅供阅读</span></header>
+      <header className="shared-reader-header"><Link href="/" className="share-brand">声阅</Link><span>分享阅读页 · 仅供阅读</span></header>
       <article className="shared-reader-article">
         <p className="shared-reader-meta">{document.siteName} · 由声阅转换</p>
         <h1>{document.title}</h1>

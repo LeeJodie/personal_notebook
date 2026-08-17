@@ -5,7 +5,7 @@
 - 产品与架构方案：[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md)
 - 前后端联调契约：[`public/openapi.yaml`](public/openapi.yaml)
 
-原型中的 URL 导入已连接真实服务端抓取，抓取结果会贯穿 Reader、浏览器 TTS、单 HTML 导出和临时分享链接；抓取失败会明确报错，不会使用内置示例冒充网页内容。生产用 Crawl4AI 0.9.2 容器位于 [`services/crawler`](services/crawler)，体验站在尚未绑定容器时使用 Worker 正文提取器。Office/PDF 解析、分享链接持久化与知识库持久化尚待接入。
+URL 导入已连接真实服务端抓取，并将 Reader JSON、H5、知识分块与分享记录保存到 D1/R2；抓取失败会明确报错，不会使用内置示例冒充网页内容。Markdown 在 Worker 中直接解析；DOCX、PDF、XLSX 由隔离的 [`services/document_processor`](services/document_processor) 服务解析。生产环境将 Crawl4AI 与 document-processor 作为私有 HTTP 服务绑定，避免上传文件暴露到公网。
 
 ## 本地启动
 
@@ -27,8 +27,9 @@ npm test
 
 ## 体验范围
 
-- URL 导入：抓取真实网页正文，支持浏览器 TTS、H5 一键下载。
-- 分享：阅读页可生成带有效期的临时链接、复制/系统转发、限制 H5 下载并关闭链接；本地服务重启后临时链接会失效。
-- 文件：支持选择与校验格式。服务端 Office/PDF 解析尚未连接，因此不会伪造转换结果。
+- URL 导入：抓取真实网页正文，持久化生成阅读页、H5、知识分块，支持浏览器 TTS 与下载。
+- 文件：Markdown 可在本地直接完成保存、解析、H5 生成和检索；DOCX、PDF、XLSX 需启动 document-processor 并配置私有绑定后可完成同一链路。
+- 分享：资料所有者可生成带有效期与 H5 下载权限的链接，并可立即撤销。链接 token 只存哈希，不会写入数据库明文。
+- 检索：默认使用用户隔离的 D1 关键词分块检索；部署 [`services/knowledge_index`](services/knowledge_index) 并配置私有绑定后，自动切换到 FastEmbed + Qdrant 语义召回。
 
 完整的生产数据与权限设计见 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md)，前后端联调以 [`public/openapi.yaml`](public/openapi.yaml) 为准。

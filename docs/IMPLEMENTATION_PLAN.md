@@ -182,4 +182,4 @@ flowchart LR
 
 ## 10. 本原型的边界
 
-当前仓库中的 UI 是可交互高保真原型。URL 导入已连接真实服务端抓取：配置 `CUSTOMER_HTTP_CRAWLER` 私有绑定时使用 `services/crawler` 中的 Crawl4AI 0.9.2 服务；未配置时使用 Worker HTML 正文提取器。两条路径的结果都会进入 Reader、TTS 和 H5 导出，且抓取失败时明确报错，不再使用内置示例冒充网页正文。文件选择、格式校验、浏览器音色选择与朗读、单 HTML 导出和原文件回下载可直接体验。开发环境还提供可打开、可关闭的临时分享链接，正式环境须将其替换为上述 `document_shares` 表、私有对象存储与鉴权 API；Office/PDF 服务端解析和知识库持久化仍待按 OpenAPI 契约接入。
+当前仓库已进入后端 MVP 阶段。D1 保存 `documents`、`document_chunks` 和 `document_shares`，R2 保存原始文件与 H5；所有读取均按服务端解析的当前用户身份注入 tenant/user 条件。URL 导入已连接真实抓取并持久化为 Reader、H5 和知识分块；Markdown 可由 Worker 直接解析。DOCX、PDF、XLSX 解析服务位于 `services/document_processor`，部署为 `CUSTOMER_HTTP_DOCUMENT_PROCESSOR` 私有绑定后即可写入相同的存储/索引链路。分享 token 仅保存 SHA-256 哈希，支持到期和撤销。默认检索使用 D1 的用户隔离关键词召回；`services/knowledge_index` 提供 FastEmbed + Qdrant 语义召回，配置 `CUSTOMER_HTTP_KNOWLEDGE_INDEX` 私有绑定后，Worker 自动写入向量并优先查询该服务，异常时回退 D1。生产环境仍应在队列中执行解析和向量重试，以满足高并发下的背压与失败恢复要求。

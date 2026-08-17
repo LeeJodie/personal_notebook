@@ -1,20 +1,6 @@
-export interface CrawlSection {
-  id: string;
-  eyebrow: string;
-  title: string;
-  paragraphs: string[];
-}
+import type { ReaderDocument } from "./reader";
 
-export interface CrawlDocument {
-  title: string;
-  description: string;
-  sourceUrl: string;
-  siteName: string;
-  fetchedAt: string;
-  wordCount: number;
-  engine: "crawl4ai" | "server-html-extractor";
-  sections: CrawlSection[];
-}
+export type CrawlDocument = ReaderDocument;
 
 interface CrawlEnv {
   CUSTOMER_HTTP_CRAWLER?: Fetcher;
@@ -146,7 +132,10 @@ export function extractDocumentFromHtml(html: string, sourceUrl: string): CrawlD
     seenParagraphs.add(line);
     current.paragraphs.push(line);
     totalChars += line.length;
-    if (current.paragraphs.length >= 10) pushCurrent(), current = null;
+    if (current.paragraphs.length >= 10) {
+      pushCurrent();
+      current = null;
+    }
   }
   pushCurrent();
 
@@ -240,28 +229,30 @@ export async function handleCrawlRequest(request: Request, env: CrawlEnv): Promi
   if (request.method !== "POST") return json({ error: "METHOD_NOT_ALLOWED", message: "仅支持 POST。" }, 405);
   try {
     const body = await request.json<{ url?: string }>();
-    const target = normalizeUrl(body.url);
-
-    // Production path: a private HTTP binding points to the containerized
-    // Crawl4AI service in services/crawler. The public Sites preview keeps a
-    // server-side HTML extractor fallback so it never substitutes demo copy.
-    if (env.CUSTOMER_HTTP_CRAWLER) {
-      const upstream = await env.CUSTOMER_HTTP_CRAWLER.fetch("http://crawler.internal/v1/crawl", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: target.toString() }),
-      });
-      if (upstream.ok) {
-        const data = await upstream.json<Record<string, unknown>>();
-        return json({ ...data, engine: "crawl4ai" });
-      }
-    }
-
-    const { html, finalUrl } = await fetchPublicHtml(target);
-    const document = extractDocumentFromHtml(html, finalUrl);
+    const document = await crawlUrl(body.url, env);
     return json(document);
   } catch (error) {
     const message = error instanceof Error ? error.message : "抓取失败。";
     return json({ error: "CRAWL_FAILED", message }, 422);
   }
+}
+
+export async function crawlUrl(value: unknown, env: CrawlEnv): Promise<CrawlDocument> {
+  const target = normalizeUrl(value);
+  // Production path: a private HTTP binding points to the containerized
+  // Crawl4AI service in services/crawler. The public Sites preview keeps a
+  // server-side HTML extractor fallback so it never substitutes demo copy.
+  if (env.CUSTOMER_HTTP_CRAWLER) {
+    const upstream = await env.CUSTOMER_HTTP_CRAWLER.fetch("http://crawler.internal/v1/crawl", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: target.toString() }),
+    });
+    if (upstream.ok) {
+      const data = await upstream.json<Record<string, unknown>>();
+      return { ...data, engine: "crawl4ai" } as CrawlDocument;
+    }
+  }
+  const { html, finalUrl } = await fetchPublicHtml(target);
+  return extractDocumentFromHtml(html, finalUrl);
 }

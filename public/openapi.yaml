@@ -34,6 +34,37 @@ paths:
               schema: { $ref: '#/components/schemas/UploadSession' }
         '400': { $ref: '#/components/responses/Problem' }
         '413': { $ref: '#/components/responses/Problem' }
+  '/v1/documents:upload':
+    post:
+      tags: [Uploads, Documents]
+      summary: Upload and process one document in the MVP integration flow
+      operationId: uploadAndProcessDocument
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: DOCX, MD, PDF or XLSX; maximum 200 MB.
+      responses:
+        '201':
+          description: Document processed and persisted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessedDocument' }
+        '202':
+          description: Document stored but parsing is still pending
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProcessedDocument' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
   /v1/documents:
     get:
       tags: [Documents]
@@ -106,11 +137,11 @@ paths:
                     include_images: { type: boolean, default: true }
                     max_depth: { type: integer, minimum: 0, maximum: 1, default: 0 }
       responses:
-        '202':
-          description: Crawl accepted
+        '201':
+          description: URL crawled, processed and persisted
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/AcceptedJob' }
+              schema: { $ref: '#/components/schemas/ProcessedDocument' }
         '422': { $ref: '#/components/responses/Problem' }
   /v1/documents/{document_id}:
     parameters: [{ $ref: '#/components/parameters/DocumentId' }]
@@ -120,21 +151,22 @@ paths:
       operationId: getDocument
       responses:
         '200':
-          description: Document
+          description: Document metadata wrapper
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Document' }
+              schema:
+                type: object
+                required: [document]
+                properties:
+                  document: { $ref: '#/components/schemas/Document' }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       tags: [Documents]
       summary: Delete document, artifacts, chunks, vectors and cached audio
       operationId: deleteDocument
       responses:
-        '202':
-          description: Deletion accepted
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/AcceptedJob' }
+        '204':
+          description: Document, persisted shares, chunks and stored artifacts deleted
         '404': { $ref: '#/components/responses/Problem' }
   /v1/documents/{document_id}/reader:
     get:
@@ -144,37 +176,35 @@ paths:
       parameters: [{ $ref: '#/components/parameters/DocumentId' }]
       responses:
         '200':
-          description: Reader model
+          description: Reader model persisted for the completed document
           headers:
             ETag: { schema: { type: string } }
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ReaderDocument' }
+              schema: { $ref: '#/components/schemas/ReaderProjection' }
         '409': { $ref: '#/components/responses/Problem' }
   /v1/documents/{document_id}/artifacts/{artifact_type}:
     get:
       tags: [Documents]
-      summary: Obtain a short-lived download URL for original or H5 artifact
+      summary: Download the stored original or H5 artifact
       operationId: getDocumentArtifact
       parameters:
         - { $ref: '#/components/parameters/DocumentId' }
         - name: artifact_type
           in: path
           required: true
-          schema: { type: string, enum: [original, h5, offline_zip] }
+          schema: { type: string, enum: [original, h5] }
       responses:
         '200':
-          description: Download descriptor
+          description: Artifact stream
+          headers:
+            Content-Disposition: { schema: { type: string } }
           content:
-            application/json:
-              schema:
-                type: object
-                required: [download_url, expires_at, filename]
-                properties:
-                  download_url: { type: string, format: uri }
-                  expires_at: { type: string, format: date-time }
-                  filename: { type: string }
-                  sha256: { type: string }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+            text/html:
+              schema: { type: string }
+        '409': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/documents/{document_id}/shares:
     parameters: [{ $ref: '#/components/parameters/DocumentId' }]
@@ -204,11 +234,10 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [expires_at]
+              required: [expires_in_hours]
               properties:
-                expires_at: { type: string, format: date-time }
+                expires_in_hours: { type: integer, minimum: 1, maximum: 720, default: 168 }
                 allow_download: { type: boolean, default: true }
-                password: { type: string, minLength: 8, maxLength: 128, writeOnly: true }
       responses:
         '201':
           description: Share created
@@ -251,10 +280,32 @@ paths:
                 type: object
                 required: [reader, expires_at, allow_download]
                 properties:
-                  reader: { $ref: '#/components/schemas/ReaderDocument' }
+                  reader: { $ref: '#/components/schemas/ReaderProjection' }
                   expires_at: { type: string, format: date-time }
                   allow_download: { type: boolean }
                   h5_download_url: { type: [string, 'null'], format: uri }
+        '404': { $ref: '#/components/responses/Problem' }
+        '410': { $ref: '#/components/responses/Problem' }
+  /v1/public/shares/{share_token}/artifacts/h5:
+    get:
+      security: []
+      tags: [Shares]
+      summary: Download the persisted H5 artifact when the share grants download permission
+      operationId: downloadPublicShareH5
+      parameters:
+        - name: share_token
+          in: path
+          required: true
+          schema: { type: string, minLength: 32, maxLength: 256 }
+      responses:
+        '200':
+          description: H5 file stream
+          headers:
+            Content-Disposition: { schema: { type: string } }
+          content:
+            text/html:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
         '410': { $ref: '#/components/responses/Problem' }
   /v1/jobs/{job_id}:
@@ -432,13 +483,44 @@ components:
               ready: { type: boolean }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    ProcessedDocument:
+      type: object
+      required: [document, reader]
+      properties:
+        document: { $ref: '#/components/schemas/Document' }
+        reader:
+          oneOf:
+            - { $ref: '#/components/schemas/ReaderProjection' }
+            - { type: 'null' }
+    ReaderProjection:
+      type: object
+      required: [title, description, sourceUrl, siteName, fetchedAt, wordCount, engine, sections]
+      properties:
+        document_id: { type: string, format: uuid, description: Present on the owner-only reader endpoint. }
+        title: { type: string }
+        description: { type: string }
+        sourceUrl: { type: string, description: Source URL, or an empty string for uploaded files. }
+        siteName: { type: string }
+        fetchedAt: { type: string, format: date-time }
+        wordCount: { type: integer, minimum: 0 }
+        engine: { type: string, enum: [crawl4ai, server-html-extractor, document-processor] }
+        sections:
+          type: array
+          items:
+            type: object
+            required: [id, eyebrow, title, paragraphs]
+            properties:
+              id: { type: string }
+              eyebrow: { type: string }
+              title: { type: string }
+              paragraphs: { type: array, items: { type: string } }
     DocumentShare:
       type: object
       required: [id, document_id, reader_url, expires_at, allow_download, status, created_at]
       properties:
         id: { type: string, format: uuid }
         document_id: { type: string, format: uuid }
-        reader_url: { type: string, format: uri, description: Opaque public reader URL; never construct this URL on the client. }
+        reader_url: { type: [string, 'null'], format: uri, description: Opaque public reader URL. It is returned only once when creating a share; list calls return null. }
         expires_at: { type: string, format: date-time }
         allow_download: { type: boolean }
         password_protected: { type: boolean }

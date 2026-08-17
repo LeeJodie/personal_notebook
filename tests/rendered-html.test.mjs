@@ -29,17 +29,21 @@ test("OpenAPI contract includes ingestion, progress, sharing, TTS and knowledge 
   assert.match(api, /\/v1\/knowledge\/search:/);
 });
 
-test("URL imports use the crawl API and dynamic reader data", async () => {
-  const [page, worker, crawler] = await Promise.all([
+test("URL imports use the persistent document API and dynamic reader data", async () => {
+  const [page, worker, crawler, documents] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("worker/index.ts", root), "utf8"),
     readFile(new URL("worker/crawl.ts", root), "utf8"),
+    readFile(new URL("worker/documents.ts", root), "utf8"),
   ]);
-  assert.match(page, /fetch\("\/api\/crawl"/);
+  assert.match(page, /fetch\("\/v1\/documents:import-url"/);
+  assert.match(page, /fetch\("\/v1\/documents:upload"/);
   assert.match(page, /readerDocument\.sections\.map/);
   assert.match(page, /未生成任何替代内容/);
   assert.match(worker, /handleCrawlRequest/);
   assert.match(crawler, /extractDocumentFromHtml/);
+  assert.match(documents, /env\.DOCUMENTS\.put/);
+  assert.match(documents, /document_chunks/);
 });
 
 test("reader exposes H5 download and a revocable share link", async () => {
@@ -50,8 +54,26 @@ test("reader exposes H5 download and a revocable share link", async () => {
   ]);
   assert.match(page, /一键下载 H5/);
   assert.match(page, /生成分享链接/);
-  assert.match(page, /fetch\("\/api\/shares"/);
+  assert.match(page, /\/v1\/documents\/\$\{readerDocument\.documentId\}\/shares/);
   assert.match(shareWorker, /handleShareRequest/);
-  assert.match(shareWorker, /x-share-revoke-token/);
+  assert.match(shareWorker, /tokenHash/);
+  assert.match(shareWorker, /status = 'revoked'/);
+  assert.match(shareWorker, /SHARE_DOWNLOAD_FORBIDDEN/);
   assert.match(sharePage, /下载 H5/);
+  assert.match(sharePage, /\/v1\/public\/shares\//);
+});
+
+test("backend includes durable document parsing and private knowledge boundaries", async () => {
+  const [schema, processor, share] = await Promise.all([
+    readFile(new URL("db/schema.ts", root), "utf8"),
+    readFile(new URL("services/document_processor/main.py", root), "utf8"),
+    readFile(new URL("worker/share.ts", root), "utf8"),
+  ]);
+  assert.match(schema, /documentShares/);
+  assert.match(schema, /documentChunks/);
+  assert.match(processor, /parse_docx/);
+  assert.match(processor, /parse_pdf/);
+  assert.match(processor, /parse_xlsx/);
+  assert.match(share, /tokenHash/);
+  assert.match(share, /owner_user_id/);
 });
