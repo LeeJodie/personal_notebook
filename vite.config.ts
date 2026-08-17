@@ -35,6 +35,9 @@ const localBindingConfig = {
     // Local parser service only. Hosted deployments must use the private
     // CUSTOMER_HTTP_DOCUMENT_PROCESSOR binding instead of an HTTP URL.
     LOCAL_DOCUMENT_PROCESSOR_URL: "http://127.0.0.1:8765",
+    // Local CosyVoice bridge. Hosted deployments use the private
+    // CUSTOMER_HTTP_TTS binding rather than an HTTP URL.
+    LOCAL_TTS_URL: "http://127.0.0.1:9876",
   },
 };
 

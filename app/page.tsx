@@ -56,6 +56,12 @@ interface AuthUser {
   auth_mode: "platform" | "local";
 }
 
+interface PrivateTtsVoice {
+  id: string;
+  label: string;
+  language: string;
+}
+
 const supportedExtensions = ["DOCX", "MD", "TXT", "XLSX", "PDF"];
 
 const demoDocument: ReaderDocument = {
@@ -130,6 +136,8 @@ export default function Home() {
   const [processingName, setProcessingName] = useState("");
   const [voiceName, setVoiceName] = useState("");
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [privateTtsVoices, setPrivateTtsVoices] = useState<PrivateTtsVoice[]>([]);
+  const [ttsProvider, setTtsProvider] = useState<"browser" | "cosyvoice">("browser");
   const [speaking, setSpeaking] = useState(false);
   const [speechProgress, setSpeechProgress] = useState(0);
   const [notice, setNotice] = useState("");
@@ -164,6 +172,9 @@ export default function Home() {
   const [loginSubmitting, setLoginSubmitting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+  const ttsAbortRef = useRef<AbortController | null>(null);
   const speechOffsetRef = useRef(0);
   const speechSessionRef = useRef(0);
   const crawlAbortRef = useRef<AbortController | null>(null);
@@ -196,7 +207,12 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [view, sourceType, isCrawling]);
 
-  useEffect(() => () => window.speechSynthesis?.cancel(), []);
+  useEffect(() => () => {
+    window.speechSynthesis?.cancel();
+    ttsAbortRef.current?.abort();
+    audioRef.current?.pause();
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -212,6 +228,22 @@ export default function Home() {
       .catch(() => { if (active) setAuthReady(true); });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    const ttsUserId = currentUser?.id;
+    if (!ttsUserId) return;
+    let active = true;
+    fetch("/v1/tts/voices", { cache: "no-store" })
+      .then(async (response) => ({ response, result: await response.json() as { items?: PrivateTtsVoice[] } }))
+      .then(({ response, result }) => {
+        if (!active || !response.ok || !Array.isArray(result.items) || !result.items.length) return;
+        setPrivateTtsVoices(result.items);
+        setTtsProvider("cosyvoice");
+        setVoiceName(result.items[0].id);
+      })
+      .catch(() => { if (active) setTtsProvider("browser"); });
+    return () => { active = false; };
+  }, [currentUser?.id]);
 
   const requireLogin = () => {
     if (currentUser) return true;
@@ -283,6 +315,8 @@ export default function Home() {
     await fetch("/v1/auth/local-signout", { method: "POST" });
     stopSpeech(true);
     setCurrentUser(null);
+    setPrivateTtsVoices([]);
+    setTtsProvider("browser");
     setStoredDocuments([]);
     setSearchHits([]);
     setView("create");
@@ -423,8 +457,18 @@ export default function Home() {
     acceptFile(event.dataTransfer.files[0]);
   };
 
+  const clearPrivateAudio = () => {
+    audioRef.current?.pause();
+    audioRef.current = null;
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    audioUrlRef.current = null;
+  };
+
   const stopSpeech = (resetProgress = false) => {
     speechSessionRef.current += 1;
+    ttsAbortRef.current?.abort();
+    ttsAbortRef.current = null;
+    clearPrivateAudio();
     window.speechSynthesis?.cancel();
     utteranceRef.current = null;
     setSpeaking(false);
@@ -467,9 +511,88 @@ export default function Home() {
     setSpeaking(true);
   };
 
+  const playCosySegment = async (offset: number, selectedVoice: string, session: number) => {
+    const segment = articleText.slice(offset, offset + 1_500);
+    if (!segment || speechSessionRef.current !== session) return;
+    const controller = new AbortController();
+    ttsAbortRef.current = controller;
+    try {
+      const response = await fetch("/v1/tts/synthesize", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: segment, voice_id: selectedVoice, speed: 1 }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({})) as { message?: string };
+        throw new Error(result.message || "CosyVoice 合成失败。");
+      }
+      const audioUrl = URL.createObjectURL(await response.blob());
+      if (speechSessionRef.current !== session) {
+        URL.revokeObjectURL(audioUrl);
+        return;
+      }
+      clearPrivateAudio();
+      audioUrlRef.current = audioUrl;
+      const audio = new Audio(audioUrl);
+      audioRef.current = audio;
+      audio.ontimeupdate = () => {
+        if (speechSessionRef.current !== session || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+        const absoluteOffset = Math.min(articleText.length, offset + Math.round(segment.length * (audio.currentTime / audio.duration)));
+        speechOffsetRef.current = absoluteOffset;
+        setSpeechProgress(Math.min(100, Math.round((absoluteOffset / articleText.length) * 100)));
+      };
+      audio.onended = () => {
+        if (speechSessionRef.current !== session) return;
+        const nextOffset = offset + segment.length;
+        speechOffsetRef.current = Math.min(articleText.length, nextOffset);
+        setSpeechProgress(Math.min(100, Math.round((speechOffsetRef.current / articleText.length) * 100)));
+        if (nextOffset >= articleText.length) {
+          setSpeaking(false);
+          return;
+        }
+        void playCosySegment(nextOffset, selectedVoice, session);
+      };
+      audio.onerror = () => {
+        if (speechSessionRef.current === session) {
+          setSpeaking(false);
+          setNotice("CosyVoice 音频播放失败，已停止朗读。");
+        }
+      };
+      await audio.play();
+    } catch (error) {
+      if (controller.signal.aborted || speechSessionRef.current !== session) return;
+      setSpeaking(false);
+      setNotice(error instanceof Error ? error.message : "CosyVoice 服务暂不可用。");
+    } finally {
+      if (ttsAbortRef.current === controller) ttsAbortRef.current = null;
+    }
+  };
+
+  const speakWithCosyVoice = (requestedOffset: number, selectedVoice = voiceName) => {
+    if (!articleText || !selectedVoice) {
+      setNotice("CosyVoice 音色尚未就绪，请稍后再试。");
+      return;
+    }
+    const offset = requestedOffset >= articleText.length ? 0 : Math.max(0, requestedOffset);
+    const session = speechSessionRef.current + 1;
+    speechSessionRef.current = session;
+    ttsAbortRef.current?.abort();
+    clearPrivateAudio();
+    window.speechSynthesis?.cancel();
+    speechOffsetRef.current = offset;
+    setSpeechProgress(Math.round((offset / articleText.length) * 100));
+    setSpeaking(true);
+    void playCosySegment(offset, selectedVoice, session);
+  };
+
   const playSpeech = () => {
     if (speaking) {
       stopSpeech(false);
+      return;
+    }
+    if (ttsProvider === "cosyvoice" && privateTtsVoices.length) {
+      speakWithCosyVoice(speechProgress >= 100 ? 0 : speechOffsetRef.current);
       return;
     }
     speakFromOffset(speechProgress >= 100 ? 0 : speechOffsetRef.current);
@@ -478,6 +601,10 @@ export default function Home() {
   const changeVoice = (nextVoice: string) => {
     setVoiceName(nextVoice);
     if (!speaking) return;
+    if (ttsProvider === "cosyvoice" && privateTtsVoices.length) {
+      speakWithCosyVoice(speechOffsetRef.current, nextVoice);
+      return;
+    }
     speakFromOffset(speechOffsetRef.current, nextVoice);
   };
 
@@ -757,8 +884,8 @@ export default function Home() {
       </div>
       <div className="tts-player">
         <button className="play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
-        <div className="track-info"><div><strong>{speaking ? "正在朗读 · " : "准备就绪 · "}01</strong><span>{readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className="audio-progress"><span style={{ width: `${speechProgress}%` }} /></div></div>
-        <div className="voice-select"><label htmlFor="voice">音色</label><select id="voice" value={voiceName} onChange={(event) => changeVoice(event.target.value)}>{voices.length ? voices.slice(0, 12).map((voice) => <option key={`${voice.name}-${voice.lang}`} value={voice.name}>{voice.name} · {voice.lang}</option>) : <option>系统默认音色</option>}</select></div>
+        <div className="track-info"><div><strong>{speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "cosyvoice" ? "CosyVoice" : "浏览器语音"}</strong><span>{readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className="audio-progress"><span style={{ width: `${speechProgress}%` }} /></div></div>
+        <div className="voice-select"><label htmlFor="voice">音色 {ttsProvider === "cosyvoice" ? "· 私有模型" : "· 系统"}</label><select id="voice" value={voiceName} onChange={(event) => changeVoice(event.target.value)}>{ttsProvider === "cosyvoice" && privateTtsVoices.length ? privateTtsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label} · {voice.language}</option>) : voices.length ? voices.slice(0, 12).map((voice) => <option key={`${voice.name}-${voice.lang}`} value={voice.name}>{voice.name} · {voice.lang}</option>) : <option>系统默认音色</option>}</select></div>
         <span className="speed-pill">1.0×</span>
       </div>
       {notice && <button className="toast" onClick={() => setNotice("")} aria-label="关闭提示">{notice}<span>×</span></button>}
@@ -813,7 +940,7 @@ export default function Home() {
           ["GET", "/v1/documents/{document_id}/reader", "获取结构化阅读模型"],
           ["POST", "/v1/documents/{document_id}/shares", "生成可撤销的阅读分享链接"],
           ["GET", "/v1/public/shares/{share_token}", "匿名打开已授权的分享阅读页"],
-          ["POST", "/v1/tts/sessions", "创建 TTS 流式会话"],
+          ["POST", "/v1/tts/synthesize", "使用私有 CosyVoice 合成音频"],
           ["POST", "/v1/knowledge/search", "在当前用户知识库检索"],
         ].map(([method, path, desc]) => <div className="endpoint" key={path}><span className={`method ${method.toLowerCase()}`}>{method}</span><code>{path}</code><p>{desc}</p><button aria-label={`查看 ${path}`}>↗</button></div>)}
       </div>

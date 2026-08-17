@@ -5,6 +5,7 @@ import { handleCrawlRequest } from "./crawl";
 import { handleAuthRequest } from "./auth";
 import { handleDocumentRequest } from "./documents";
 import { handleShareRequest } from "./share";
+import { handleTtsRequest } from "./tts";
 
 interface Env {
   ASSETS: Fetcher;
@@ -13,7 +14,9 @@ interface Env {
   CUSTOMER_HTTP_CRAWLER?: Fetcher;
   CUSTOMER_HTTP_DOCUMENT_PROCESSOR?: Fetcher;
   CUSTOMER_HTTP_KNOWLEDGE_INDEX?: Fetcher;
+  CUSTOMER_HTTP_TTS?: Fetcher;
   LOCAL_DOCUMENT_PROCESSOR_URL?: string;
+  LOCAL_TTS_URL?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -53,6 +56,9 @@ const worker = {
     if (url.pathname === "/v1/auth/me" || url.pathname === "/v1/auth/local-register" || url.pathname === "/v1/auth/local-signin" || url.pathname === "/v1/auth/local-signout") {
       return handleAuthRequest(withPath(request, url.pathname.replace(/^\/v1/, "/api")), env);
     }
+    if (url.pathname === "/v1/tts/voices" || url.pathname === "/v1/tts/synthesize") {
+      return handleTtsRequest(withPath(request, url.pathname.replace(/^\/v1/, "/api")), env);
+    }
     if (url.pathname === "/v1/documents:import-url") {
       return handleDocumentRequest(withPath(request, "/api/documents/import-url"), env);
     }
@@ -71,6 +77,10 @@ const worker = {
 
     if (url.pathname === "/api/auth/me" || url.pathname === "/api/auth/local-register" || url.pathname === "/api/auth/local-signin" || url.pathname === "/api/auth/local-signout") {
       return handleAuthRequest(request, env);
+    }
+
+    if (url.pathname === "/api/tts/voices" || url.pathname === "/api/tts/synthesize") {
+      return handleTtsRequest(request, env);
     }
 
     if (url.pathname === "/api/shares" || url.pathname.startsWith("/api/shares/") || url.pathname.includes("/shares")) {

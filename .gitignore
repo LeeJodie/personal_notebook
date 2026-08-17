@@ -38,3 +38,10 @@ yarn-error.log*
 /.wrangler/
 /outputs/
 /work/
+
+# Locally deployed CosyVoice source, Python runtime and downloaded model assets.
+# The tracked wrapper under services/cosyvoice keeps this deployment reproducible.
+/services/cosyvoice/CosyVoice/
+/services/cosyvoice/.venv/
+/services/cosyvoice/models/
+/services/cosyvoice/__pycache__/
