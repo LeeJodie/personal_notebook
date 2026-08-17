@@ -1,6 +1,6 @@
 # Document processor
 
-隔离的 Python 解析服务，处理 DOCX、MD、PDF、XLSX，并输出声阅统一 Reader JSON。它不保存原始文件：Worker 从 R2 读取文件流后经私有 HTTP 绑定发送给服务，随后把 Reader JSON、H5 和知识分块持久化回 D1/R2。
+隔离的 Python 解析服务，处理 DOCX、MD、TXT、PDF、XLSX，并输出声阅统一 Reader JSON。它不保存原始文件：Worker 从 R2 读取文件流后经私有 HTTP 绑定发送给服务，随后把 Reader JSON、H5 和知识分块持久化回 D1/R2。
 
 本地运行：
 

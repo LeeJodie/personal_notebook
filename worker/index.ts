@@ -2,6 +2,7 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { handleCrawlRequest } from "./crawl";
+import { handleAuthRequest } from "./auth";
 import { handleDocumentRequest } from "./documents";
 import { handleShareRequest } from "./share";
 
@@ -49,6 +50,9 @@ const worker = {
     if (url.pathname === "/v1/documents:upload") {
       return handleDocumentRequest(withPath(request, "/api/documents/upload"), env);
     }
+    if (url.pathname === "/v1/auth/me" || url.pathname === "/v1/auth/local-signin" || url.pathname === "/v1/auth/local-signout") {
+      return handleAuthRequest(withPath(request, url.pathname.replace(/^\/v1/, "/api")), env);
+    }
     if (url.pathname === "/v1/documents:import-url") {
       return handleDocumentRequest(withPath(request, "/api/documents/import-url"), env);
     }
@@ -63,6 +67,10 @@ const worker = {
 
     if (url.pathname === "/api/crawl") {
       return handleCrawlRequest(request, env);
+    }
+
+    if (url.pathname === "/api/auth/me" || url.pathname === "/api/auth/local-signin" || url.pathname === "/api/auth/local-signout") {
+      return handleAuthRequest(request, env);
     }
 
     if (url.pathname === "/api/shares" || url.pathname.startsWith("/api/shares/") || url.pathname.includes("/shares")) {

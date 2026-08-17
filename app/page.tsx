@@ -47,7 +47,15 @@ interface SearchHit {
   heading_path: string[];
 }
 
-const supportedExtensions = ["DOCX", "MD", "XLSX", "PDF"];
+interface AuthUser {
+  id: string;
+  tenant_id: string;
+  display_name: string;
+  email: string | null;
+  auth_mode: "platform" | "local";
+}
+
+const supportedExtensions = ["DOCX", "MD", "TXT", "XLSX", "PDF"];
 
 const demoDocument: ReaderDocument = {
   title: "智能阅读项目建设方案",
@@ -141,6 +149,15 @@ export default function Home() {
   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
   const [libraryError, setLibraryError] = useState("");
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [localDevelopment, setLocalDevelopment] = useState(false);
+  const [signInUrl, setSignInUrl] = useState("");
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("local@shengyue.test");
+  const [loginName, setLoginName] = useState("本地体验用户");
+  const [loginError, setLoginError] = useState("");
+  const [loginSubmitting, setLoginSubmitting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const speechOffsetRef = useRef(0);
@@ -177,7 +194,67 @@ export default function Home() {
 
   useEffect(() => () => window.speechSynthesis?.cancel(), []);
 
+  useEffect(() => {
+    let active = true;
+    fetch("/v1/auth/me", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((result: { authenticated?: boolean; user?: AuthUser | null; local_development?: boolean; sign_in_url?: string | null }) => {
+        if (!active) return;
+        setCurrentUser(result.authenticated && result.user ? result.user : null);
+        setLocalDevelopment(Boolean(result.local_development));
+        setSignInUrl(result.sign_in_url || "");
+        setAuthReady(true);
+      })
+      .catch(() => { if (active) setAuthReady(true); });
+    return () => { active = false; };
+  }, []);
+
+  const requireLogin = () => {
+    if (currentUser) return true;
+    setLoginError("");
+    setLoginOpen(true);
+    return false;
+  };
+
+  const signInLocal = async () => {
+    if (loginSubmitting) return;
+    setLoginSubmitting(true);
+    setLoginError("");
+    try {
+      const response = await fetch("/v1/auth/local-signin", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: loginEmail, display_name: loginName }),
+      });
+      const result = await response.json() as { user?: AuthUser; message?: string };
+      if (!response.ok || !result.user) throw new Error(result.message || "登录失败，请稍后重试。");
+      setCurrentUser(result.user);
+      setLoginOpen(false);
+      setNotice(`已进入 ${result.user.display_name} 的私有空间。`);
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : "登录失败，请稍后重试。");
+    } finally {
+      setLoginSubmitting(false);
+    }
+  };
+
+  const signOut = async () => {
+    if (!currentUser) return;
+    if (currentUser.auth_mode === "platform") {
+      window.location.assign("/signout-with-chatgpt?return_to=/");
+      return;
+    }
+    await fetch("/v1/auth/local-signout", { method: "POST" });
+    stopSpeech(true);
+    setCurrentUser(null);
+    setStoredDocuments([]);
+    setSearchHits([]);
+    setView("create");
+    setNotice("已退出本地体验账号。");
+  };
+
   const loadLibrary = async () => {
+    if (!requireLogin()) return;
     setLibraryLoading(true);
     setLibraryError("");
     try {
@@ -193,17 +270,20 @@ export default function Home() {
   };
 
   const openLibrary = () => {
+    if (!requireLogin()) return;
     setView("library");
     void loadLibrary();
   };
 
   const openHistory = () => {
+    if (!requireLogin()) return;
     setView("history");
     void loadLibrary();
   };
 
   const startProcessing = async () => {
     if (!selectedFile || isUploading) return;
+    if (!requireLogin()) return;
     crawlAbortRef.current?.abort();
     crawlAbortRef.current = null;
     setSourceType("file");
@@ -235,6 +315,7 @@ export default function Home() {
 
   const submitUrl = async () => {
     if (isCrawling) return;
+    if (!requireLogin()) return;
     let parsed: URL;
     try {
       const candidate = /^https?:\/\//i.test(url.trim()) ? url.trim() : `https://${url.trim()}`;
@@ -289,7 +370,7 @@ export default function Home() {
     if (!file) return;
     const ext = file.name.split(".").pop()?.toUpperCase() || "";
     if (!supportedExtensions.includes(ext)) {
-      setNotice("当前已接入 DOCX、PDF、XLSX 和 Markdown；DOC、PPT/PPTX 将在下一阶段接入。");
+      setNotice("当前已接入 DOCX、PDF、XLSX、TXT 和 Markdown；DOC、PPT/PPTX 将在下一阶段接入。");
       return;
     }
     crawlAbortRef.current?.abort();
@@ -414,6 +495,7 @@ export default function Home() {
 
   const createShare = async () => {
     if (isSharing) return;
+    if (!requireLogin()) return;
     if (!readerDocument.documentId) {
       setShareError("请先导入网址或文件后再创建持久化分享链接。");
       return;
@@ -538,7 +620,7 @@ export default function Home() {
 
         {sourceType === "file" ? (
           <div className={`drop-zone ${dragging ? "dragging" : ""} ${selectedFile ? "has-file" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
-            <input ref={fileInput} type="file" accept=".docx,.md,.xlsx,.pdf" onChange={(event) => acceptFile(event.target.files?.[0])} />
+            <input ref={fileInput} type="file" accept=".docx,.md,.txt,.xlsx,.pdf" onChange={(event) => acceptFile(event.target.files?.[0])} />
             {selectedFile ? (
               <>
                 <div className="file-ready"><span className="file-badge">{selectedFile.name.split(".").pop()?.toUpperCase()}</span><div><strong>{selectedFile.name}</strong><small>{(selectedFile.size / 1024 / 1024).toFixed(1)} MB · 已就绪</small></div><AppIcon name="check" /></div>
@@ -606,7 +688,7 @@ export default function Home() {
         <div className="outline-file"><span className="pdf-tile">{selectedFile?.name.split(".").pop()?.toUpperCase() || (readerDocument.sourceUrl ? "URL" : "DEMO")}</span><div><strong>{readerDocument.title}</strong><small>{readerDocument.sections.length} 章 · 约 {Math.max(1, Math.ceil(readerDocument.wordCount / 350))} 分钟</small></div></div>
         <p className="outline-title">文章目录</p>
         <nav>{readerDocument.sections.map((section, index) => <a key={section.id} href={`#${section.id}`}><span>{String(index + 1).padStart(2, "0")}</span>{section.title}</a>)}</nav>
-        <div className="private-note"><AppIcon name={readerDocument.engine === "demo" ? "book" : "check"} /><span><strong>{readerDocument.engine === "demo" ? "明确标记的阅读示例" : "已保存到个人知识库"}</strong><small>{readerDocument.engine === "crawl4ai" ? "Crawl4AI 处理" : readerDocument.engine === "document-processor" ? "DOCX / PDF / XLSX / MD 解析" : readerDocument.engine === "demo" ? "不代表用户文件或网页" : "服务端 HTML 正文提取"}</small></span></div>
+        <div className="private-note"><AppIcon name={readerDocument.engine === "demo" ? "book" : "check"} /><span><strong>{readerDocument.engine === "demo" ? "明确标记的阅读示例" : "已保存到个人知识库"}</strong><small>{readerDocument.engine === "crawl4ai" ? "Crawl4AI 处理" : readerDocument.engine === "document-processor" ? "DOCX / PDF / XLSX / MD / TXT 解析" : readerDocument.engine === "demo" ? "不代表用户文件或网页" : "服务端 HTML 正文提取"}</small></span></div>
       </aside>
       <article className="reader-article">
         <div className="article-meta"><span>{readerDocument.siteName}</span><span>·</span><span>{readerDocument.engine === "demo" ? "阅读示例" : readerDocument.engine === "document-processor" ? "已解析上传文件" : "实时网页抓取"}</span>{readerDocument.sourceUrl && <><span>·</span><a href={readerDocument.sourceUrl} target="_blank" rel="noreferrer">查看原网页 ↗</a></>}</div>
@@ -660,7 +742,7 @@ export default function Home() {
         const size = item.size_bytes ? `${(item.size_bytes / 1024 / 1024).toFixed(1)} MB` : "网页导入";
         return <button className="library-card" key={item.id} onClick={() => void openStoredDocument(item)}><div className={`library-cover ${color}`}><span>{type}</span><i /><i /><i /></div><div className="library-card-body"><span className="indexed"><i /> {item.status === "ready" ? "已完成索引" : item.status === "failed" ? "转换失败" : "正在处理"}</span><h2>{item.title}</h2><p>{type} · {size} · {item.word_count.toLocaleString()} 字</p><div><span>{new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(item.updated_at))}</span><span>{item.status === "ready" ? "打开阅读页 →" : "查看状态"}</span></div></div></button>;
       })}</div>
-      {!libraryLoading && !storedDocuments.length && <div className="library-empty"><strong>还没有已保存的资料</strong><p>从网址或 DOCX、MD、PDF、XLSX 导入后，它会在这里形成个人知识索引。</p><button className="primary-button" onClick={() => setView("create")}>开始导入</button></div>}
+      {!libraryLoading && !storedDocuments.length && <div className="library-empty"><strong>还没有已保存的资料</strong><p>从网址或 DOCX、MD、TXT、PDF、XLSX 导入后，它会在这里形成个人知识索引。</p><button className="primary-button" onClick={() => setView("create")}>开始导入</button></div>}
       <div className="tenant-banner"><AppIcon name="lock" /><div><strong>你的知识，只属于你</strong><p>平台在数据库、对象存储和检索服务三层强制执行用户与租户隔离。</p></div><span>当前用户 · 私有</span></div>
     </main>
   );
@@ -673,7 +755,7 @@ export default function Home() {
         const type = item.filename?.split(".").pop()?.toUpperCase() || (item.source_type === "url" ? "URL" : "DOC");
         const statusText = item.status === "ready" ? "已完成" : item.status === "failed" ? "处理失败" : item.status === "parsing" ? "正在解析" : "等待处理";
         return <button key={item.id} className="history-item" onClick={() => void openStoredDocument(item)}><span className={`history-status ${item.status}`}>{statusText}</span><div><strong>{item.title}</strong><small>{type} · {item.source_type === "url" ? item.source_url : item.filename || "上传文件"}</small></div><span>{new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(item.updated_at))}</span><b>{item.status === "ready" ? "打开阅读页 →" : "查看详情"}</b></button>;
-      })}</section> : <div className="history-empty"><strong>暂时没有处理记录</strong><p>导入 DOCX、PDF、XLSX、Markdown 或网页链接后，状态会显示在这里。</p><button className="primary-button" onClick={() => setView("create")}>开始导入</button></div>}
+      })}</section> : <div className="history-empty"><strong>暂时没有处理记录</strong><p>导入 DOCX、PDF、XLSX、TXT、Markdown 或网页链接后，状态会显示在这里。</p><button className="primary-button" onClick={() => setView("create")}>开始导入</button></div>}
       <div className="tenant-banner"><AppIcon name="lock" /><div><strong>记录和资料均为私有</strong><p>当前列表只返回属于当前用户与租户的处理任务。</p></div><span>当前用户 · 私有</span></div>
     </main>
   );
@@ -683,6 +765,7 @@ export default function Home() {
       <div className="api-intro"><p className="overline">前后端联调契约</p><h1>一套可版本化的 API，<br />覆盖完整处理链路。</h1><p>上传、网页抓取、任务进度、阅读页、TTS 与知识检索全部使用统一错误结构和幂等机制。</p><a href="/openapi.yaml" download>下载 OpenAPI 3.1 契约 <span>↓</span></a></div>
       <div className="endpoint-list">
         {[
+          ["GET", "/v1/auth/me", "获取当前登录身份与隔离边界"],
           ["POST", "/v1/assets/uploads", "创建文件上传会话"],
           ["POST", "/v1/documents:import-url", "提交 Crawl4AI 抓取任务"],
           ["POST", "/v1/documents", "完成上传并创建处理任务"],
@@ -709,7 +792,7 @@ export default function Home() {
           <button className={view === "history" ? "active" : ""} onClick={openHistory}><AppIcon name="clock" />处理记录</button>
           <button className={view === "api" ? "active" : ""} onClick={() => setView("api")}><AppIcon name="code" />API 文档</button>
         </nav>
-        <div className="header-actions"><button className="demo-link" onClick={() => { setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button><button className="avatar" aria-label="用户菜单">MK<span /></button></div>
+        <div className="header-actions"><button className="demo-link" onClick={() => { setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button>{currentUser ? <><span className="account-name" title={currentUser.email || currentUser.display_name}>{currentUser.display_name}</span><button className="avatar" onClick={() => void signOut()} aria-label="退出登录" title="退出登录">{currentUser.display_name.slice(0, 2).toUpperCase()}<span /></button></> : <button className="login-button" onClick={() => { setLoginError(""); setLoginOpen(true); }} disabled={!authReady}>{authReady ? "登录" : "验证中…"}</button>}</div>
       </header>
       {view === "create" && renderCreate()}
       {view === "processing" && renderProcessing()}
@@ -718,6 +801,7 @@ export default function Home() {
       {view === "history" && renderHistory()}
       {view === "api" && renderApi()}
       {view === "create" && <footer><span>© 2026 声阅</span><span>隐私保护 · 数据安全 · 服务状态</span><span><i /> 全部系统正常</span></footer>}
+      {loginOpen && <div className="auth-backdrop" role="presentation"><section className="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="login-title"><button className="auth-close" onClick={() => setLoginOpen(false)} aria-label="关闭登录窗口">×</button><p className="overline">私有空间</p><h2 id="login-title">登录后管理你的资料</h2><p>文档、H5、知识检索与分享记录均按登录用户在服务端隔离。</p>{localDevelopment ? <form onSubmit={(event) => { event.preventDefault(); void signInLocal(); }}><label>显示名称<input value={loginName} onChange={(event) => setLoginName(event.target.value)} maxLength={80} required /></label><label>邮箱<input type="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} maxLength={254} required /></label>{loginError && <small className="auth-error" role="alert">{loginError}</small>}<button className="primary-button" disabled={loginSubmitting}>{loginSubmitting ? "正在进入…" : "进入本地私有空间"}</button><small className="auth-hint">本机体验账号仅用于 localhost 隔离测试；部署后使用 ChatGPT 登录。</small></form> : <><button className="primary-button" onClick={() => { if (signInUrl) window.location.assign(signInUrl); }} disabled={!signInUrl}>使用 ChatGPT 登录</button><small className="auth-hint">平台会验证身份，应用不会保存你的登录密码。</small></>}</section></div>}
     </div>
   );
 }

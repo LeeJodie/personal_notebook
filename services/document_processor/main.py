@@ -11,6 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
+import re
 
 import fitz
 from docx import Document
@@ -27,6 +28,12 @@ MAX_TEXT_CHARS = 120_000
 
 def clean(value: Any) -> str:
     return " ".join(str(value or "").replace("\x00", " ").split())
+
+
+def display_filename(filename: str) -> str:
+    path = Path(filename)
+    stem = re.sub(r"[_\-\s]?(?:19|20)\d{12}(?:\d{3})?$", "", path.stem).strip()
+    return f"{stem or path.stem}{path.suffix}"
 
 
 def section(title: str, paragraphs: list[str], index: int) -> dict[str, Any] | None:
@@ -148,7 +155,7 @@ def reader_document(title: str, filename: str, sections: list[dict[str, Any]]) -
         "title": title[:300] or Path(filename).stem[:300] or "未命名文档",
         "description": sections[0]["paragraphs"][0][:240],
         "sourceUrl": "",
-        "siteName": filename[:300] or "上传的文档",
+        "siteName": display_filename(filename)[:300] or "上传的文档",
         "fetchedAt": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         "wordCount": word_count,
         "engine": "document-processor",
@@ -165,13 +172,13 @@ async def healthz() -> dict[str, str]:
 async def parse(request: Request) -> dict[str, Any]:
     filename = unquote(request.headers.get("x-source-filename", "").strip())
     extension = Path(filename).suffix.lower()
-    if extension not in {".docx", ".md", ".pdf", ".xlsx"}:
-        raise HTTPException(status_code=422, detail="仅支持 DOCX、MD、PDF、XLSX")
+    if extension not in {".docx", ".md", ".txt", ".pdf", ".xlsx"}:
+        raise HTTPException(status_code=422, detail="仅支持 DOCX、MD、TXT、PDF、XLSX")
     blob = await request.body()
     if not blob or len(blob) > MAX_BYTES:
         raise HTTPException(status_code=413, detail="文件大小需在 1 字节到 200 MB 之间")
     try:
-        if extension == ".md":
+        if extension in {".md", ".txt"}:
             title, sections = Path(filename).stem or "Markdown 文档", markdown_sections(blob.decode("utf-8-sig", errors="replace"))
         elif extension == ".docx":
             title, sections = parse_docx(blob)
@@ -179,7 +186,7 @@ async def parse(request: Request) -> dict[str, Any]:
             title, sections = parse_pdf(blob)
         else:
             title, sections = parse_xlsx(blob)
-        fallback_title = Path(filename).stem
+        fallback_title = Path(display_filename(filename)).stem
         return {"document": reader_document(title or fallback_title, filename, sections)}
     except HTTPException:
         raise

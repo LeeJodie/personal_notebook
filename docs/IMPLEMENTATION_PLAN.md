@@ -65,6 +65,7 @@ flowchart LR
 | DOCX | Mammoth / python-docx 提取结构；复杂版式辅以 LibreOffice -> PDF 对照 |
 | DOC | 隔离容器内 LibreOffice headless 先转 DOCX/PDF，严禁宏执行 |
 | MD | markdown-it / markdown-it-py，再做 HTML 白名单清洗 |
+| TXT | UTF-8/UTF-8 BOM 解码后按自然段或 Markdown 风格标题归一化 |
 | XLS/XLSX | openpyxl/xlrd，按 sheet 生成可滚动表格、摘要和分页；限制最大单元格数 |
 | PPT/PPTX | LibreOffice 归一化 + python-pptx 提取标题/正文/备注，每页生成预览图 |
 | PDF | PyMuPDF/pdfplumber 提取；扫描件进 PaddleOCR；表格可用 Camelot/Table Transformer |
@@ -182,4 +183,4 @@ flowchart LR
 
 ## 10. 本原型的边界
 
-当前仓库已进入后端 MVP 阶段。D1 保存 `documents`、`document_chunks` 和 `document_shares`，R2 保存原始文件与 H5；所有读取均按服务端解析的当前用户身份注入 tenant/user 条件。URL 导入已连接真实抓取并持久化为 Reader、H5 和知识分块；Markdown 可由 Worker 直接解析。DOCX、PDF、XLSX 解析服务位于 `services/document_processor`，部署为 `CUSTOMER_HTTP_DOCUMENT_PROCESSOR` 私有绑定后即可写入相同的存储/索引链路。分享 token 仅保存 SHA-256 哈希，支持到期和撤销。默认检索使用 D1 的用户隔离关键词召回；`services/knowledge_index` 提供 FastEmbed + Qdrant 语义召回，配置 `CUSTOMER_HTTP_KNOWLEDGE_INDEX` 私有绑定后，Worker 自动写入向量并优先查询该服务，异常时回退 D1。生产环境仍应在队列中执行解析和向量重试，以满足高并发下的背压与失败恢复要求。
+当前仓库已进入后端 MVP 阶段。D1 保存 `documents`、`document_chunks`、`document_shares` 和本机体验会话，R2 保存原始文件与 H5；所有读取均按服务端解析的当前用户身份注入 tenant/user 条件。部署环境使用平台提供的 ChatGPT 身份头，不接受客户端提交的用户或租户字段；仅 localhost 提供 HttpOnly cookie 的多账号体验登录，用于验证隔离而非生产认证。URL 导入已连接真实抓取并持久化为 Reader、H5 和知识分块；Markdown 与 TXT 可由 Worker 直接解析。DOCX、PDF、XLSX 解析服务位于 `services/document_processor`，部署为 `CUSTOMER_HTTP_DOCUMENT_PROCESSOR` 私有绑定后即可写入相同的存储/索引链路。文件名末尾的导出时间戳会从阅读标题中移除，打开旧资料时会懒修复 Reader JSON 与 H5。分享 token 仅保存 SHA-256 哈希，支持到期和撤销。默认检索使用 D1 的用户隔离关键词召回；`services/knowledge_index` 提供 FastEmbed + Qdrant 语义召回，配置 `CUSTOMER_HTTP_KNOWLEDGE_INDEX` 私有绑定后，Worker 自动写入向量并优先查询该服务，异常时回退 D1。生产环境仍应在队列中执行解析和向量重试，以满足高并发下的背压与失败恢复要求。

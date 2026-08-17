@@ -15,6 +15,9 @@ export interface DocumentEnv {
 export interface Actor {
   tenantId: string;
   userId: string;
+  displayName: string;
+  email: string | null;
+  authMode: "platform" | "local";
 }
 
 interface DocumentRow {
@@ -40,7 +43,7 @@ interface DocumentRow {
 }
 
 const initializedStores = new WeakMap<D1Database, Promise<void>>();
-const ACCEPTED_EXTENSIONS = new Set(["docx", "md", "pdf", "xlsx"]);
+const ACCEPTED_EXTENSIONS = new Set(["docx", "md", "txt", "pdf", "xlsx"]);
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
 
 function json(data: unknown, status = 200): Response {
@@ -53,15 +56,68 @@ function problem(message: string, status = 400, code = "BAD_REQUEST"): Response 
 
 export function getActor(request: Request): Actor | null {
   const userId = request.headers.get("oai-authenticated-user-id");
-  if (userId) return { userId, tenantId: `workspace:${userId}` };
-  const hostname = new URL(request.url).hostname;
-  // Miniflare does not inject Sites identity headers. Keeping this fallback
-  // local-only makes the end-to-end developer workflow usable without
-  // weakening the deployed service's authorization boundary.
-  if (hostname === "localhost" || hostname === "127.0.0.1") {
-    return { userId: "local-developer", tenantId: "local-workspace" };
+  if (userId) {
+    const encodedName = request.headers.get("oai-authenticated-user-full-name");
+    const displayName = encodedName && request.headers.get("oai-authenticated-user-full-name-encoding") === "percent-encoded-utf-8"
+      ? decodeURIComponent(encodedName)
+      : request.headers.get("oai-authenticated-user-email") || "已登录用户";
+    return { userId, tenantId: `workspace:${userId}`, displayName, email: request.headers.get("oai-authenticated-user-email"), authMode: "platform" };
   }
   return null;
+}
+
+function isLocalRequest(request: Request): boolean {
+  const hostname = new URL(request.url).hostname;
+  return hostname === "localhost" || hostname === "127.0.0.1";
+}
+
+function readCookie(request: Request, name: string): string | null {
+  const prefix = `${name}=`;
+  for (const part of (request.headers.get("cookie") || "").split(";")) {
+    const value = part.trim();
+    if (value.startsWith(prefix)) return value.slice(prefix.length);
+  }
+  return null;
+}
+
+export async function hashOpaqueToken(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+interface LocalActorRow {
+  user_id: string;
+  email: string;
+  display_name: string;
+  expires_at: string;
+}
+
+export async function getAuthenticatedActor(request: Request, env: Pick<DocumentEnv, "DB">): Promise<Actor | null> {
+  const platformActor = getActor(request);
+  if (platformActor) return platformActor;
+  if (!isLocalRequest(request)) return null;
+  const token = readCookie(request, "shengyue_local_session");
+  if (!token) return null;
+  const session = await env.DB.prepare("SELECT s.user_id, s.expires_at, u.email, u.display_name FROM local_sessions s JOIN local_users u ON u.id = s.user_id WHERE s.token_hash = ?")
+    .bind(await hashOpaqueToken(token)).first<LocalActorRow>();
+  if (!session) return null;
+  if (Date.parse(session.expires_at) <= Date.now()) {
+    await env.DB.prepare("DELETE FROM local_sessions WHERE token_hash = ?").bind(await hashOpaqueToken(token)).run();
+    return null;
+  }
+  return {
+    userId: session.user_id,
+    // Preserve access to pre-login localhost content for the default account;
+    // every additional development account gets a separate tenant boundary.
+    tenantId: session.user_id === "local-developer" ? "local-workspace" : `local:${session.user_id}`,
+    displayName: session.display_name,
+    email: session.email,
+    authMode: "local",
+  };
+}
+
+export function isLocalDevelopmentRequest(request: Request): boolean {
+  return isLocalRequest(request);
 }
 
 export async function ensureDocumentStore(env: Pick<DocumentEnv, "DB">): Promise<void> {
@@ -76,6 +132,11 @@ export async function ensureDocumentStore(env: Pick<DocumentEnv, "DB">): Promise
     env.DB.prepare("CREATE TABLE IF NOT EXISTS document_shares (id TEXT PRIMARY KEY NOT NULL, document_id TEXT NOT NULL, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, token_hash TEXT NOT NULL, allow_download INTEGER NOT NULL DEFAULT 1, expires_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, revoked_at TEXT)"),
     env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_token_hash ON document_shares (token_hash)"),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_shares_document_status ON document_shares (document_id, status, expires_at)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS local_users (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL, display_name TEXT NOT NULL, created_at TEXT NOT NULL)"),
+    env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_local_users_email ON local_users (email)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS local_sessions (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, token_hash TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)"),
+    env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_local_sessions_token_hash ON local_sessions (token_hash)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_local_sessions_user_expiry ON local_sessions (user_id, expires_at)"),
   ]).then(() => undefined);
   initializedStores.set(env.DB, initialization);
   return initialization;
@@ -94,13 +155,25 @@ function now(): string {
 }
 
 function titleFromFilename(filename: string): string {
-  return filename.replace(/\.[^.]+$/, "").trim().slice(0, 300) || "未命名文档";
+  const withoutExtension = filename.replace(/\.[^.]+$/, "").trim();
+  // Export tools often append a 14-digit timestamp such as _20260817155132.
+  // It identifies the source file but is not part of the reading title.
+  return withoutExtension.replace(/[_\-\s]?(?:19|20)\d{12}(?:\d{3})?$/, "").trim().slice(0, 300) || "未命名文档";
+}
+
+function hasTrailingExportTimestamp(filename: string): boolean {
+  return /[_\-\s]?(?:19|20)\d{12}(?:\d{3})?(?:\.[^.]+)?$/i.test(filename.trim());
+}
+
+function displayFilename(filename: string): string {
+  const extension = filename.match(/\.[^.]+$/)?.[0] || "";
+  return `${titleFromFilename(filename)}${extension}`;
 }
 
 function serializeRow(row: DocumentRow) {
   return {
     id: row.id,
-    title: row.title,
+    title: row.filename && hasTrailingExportTimestamp(row.filename) ? titleFromFilename(row.filename) : row.title,
     description: row.description,
     source_type: row.source_type,
     source_url: row.source_url,
@@ -122,9 +195,34 @@ function serializeRow(row: DocumentRow) {
 
 async function findOwnedDocument(env: DocumentEnv, actor: Actor, documentId: string): Promise<DocumentRow | null> {
   await ensureDocumentStore(env);
-  return env.DB.prepare("SELECT * FROM documents WHERE id = ? AND tenant_id = ? AND owner_user_id = ?")
+  const row = await env.DB.prepare("SELECT * FROM documents WHERE id = ? AND tenant_id = ? AND owner_user_id = ?")
     .bind(documentId, actor.tenantId, actor.userId)
     .first<DocumentRow>();
+  return row ? normalizeLegacyDocumentTitle(env, actor, row) : null;
+}
+
+async function normalizeLegacyDocumentTitle(env: DocumentEnv, actor: Actor, row: DocumentRow): Promise<DocumentRow> {
+  if (!row.filename || !hasTrailingExportTimestamp(row.filename)) return row;
+  const normalizedTitle = titleFromFilename(row.filename);
+  const oldFilenameTitle = row.filename.replace(/\.[^.]+$/, "").trim();
+  if (row.title !== oldFilenameTitle || normalizedTitle === row.title) return row;
+  let reader: ReaderDocument | null = null;
+  try {
+    const candidate = row.reader_json ? JSON.parse(row.reader_json) : null;
+    if (isReaderDocument(candidate)) reader = { ...candidate, title: normalizedTitle, siteName: displayFilename(row.filename) };
+  } catch {
+    reader = null;
+  }
+  const h5Key = row.h5_key;
+  if (reader && h5Key) {
+    await env.DOCUMENTS.put(h5Key, createH5(reader), {
+      httpMetadata: { contentType: "text/html; charset=utf-8", contentDisposition: `attachment; filename="${encodeURIComponent(`${normalizedTitle}.html`)}` },
+    });
+  }
+  const updatedAt = now();
+  await env.DB.prepare("UPDATE documents SET title = ?, reader_json = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND owner_user_id = ?")
+    .bind(normalizedTitle, reader ? JSON.stringify(reader) : row.reader_json, updatedAt, row.id, actor.tenantId, actor.userId).run();
+  return { ...row, title: normalizedTitle, reader_json: reader ? JSON.stringify(reader) : row.reader_json, updated_at: updatedAt };
 }
 
 function extractChunks(document: ReaderDocument): Array<{ sectionTitle: string; content: string }> {
@@ -218,10 +316,11 @@ async function processOwnedDocument(env: DocumentEnv, actor: Actor, row: Documen
     .bind(now(), row.id, actor.tenantId, actor.userId).run();
   try {
     let reader: ReaderDocument;
-    if (fileExtension(row.filename || "") === "md") {
+    const extension = fileExtension(row.filename || "");
+    if (extension === "md" || extension === "txt") {
       const source = row.original_key ? await env.DOCUMENTS.get(row.original_key) : null;
-      if (!source) throw new Error("未找到待解析的原始 Markdown 文件。");
-      reader = createMarkdownReader(await source.text(), row.title);
+      if (!source) throw new Error("未找到待解析的原始文本文件。");
+      reader = createMarkdownReader(await source.text(), row.title, "", extension === "txt" ? "上传的 TXT 文档" : "上传的 Markdown 文档");
     } else {
       reader = await invokeDocumentProcessor(env, row);
     }
@@ -322,9 +421,9 @@ async function searchKnowledge(request: Request, env: DocumentEnv, actor: Actor)
 }
 
 export async function handleDocumentRequest(request: Request, env: DocumentEnv): Promise<Response> {
-  const actor = getActor(request);
-  if (!actor) return problem("请先登录后再访问个人资料。", 401, "UNAUTHENTICATED");
   await ensureDocumentStore(env);
+  const actor = await getAuthenticatedActor(request, env);
+  if (!actor) return problem("请先登录后再访问个人资料。", 401, "UNAUTHENTICATED");
   const url = new URL(request.url);
   if (request.method === "POST" && url.pathname === "/api/documents/upload") return createUploadedDocument(request, env, actor);
   if (request.method === "POST" && url.pathname === "/api/documents/import-url") return createUrlDocument(request, env, actor);

@@ -53,3 +53,26 @@ export const documentShares = sqliteTable("document_shares", {
   uniqueIndex("idx_shares_token_hash").on(table.tokenHash),
   index("idx_shares_document_status").on(table.documentId, table.status, table.expiresAt),
 ]);
+
+// These tables are used only by localhost development to make user isolation
+// testable before the hosted Site injects ChatGPT identity headers. Hosted
+// traffic never treats them as an authentication source.
+export const localUsers = sqliteTable("local_users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull(),
+  displayName: text("display_name").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_local_users_email").on(table.email),
+]);
+
+export const localSessions = sqliteTable("local_sessions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  uniqueIndex("idx_local_sessions_token_hash").on(table.tokenHash),
+  index("idx_local_sessions_user_expiry").on(table.userId, table.expiresAt),
+]);

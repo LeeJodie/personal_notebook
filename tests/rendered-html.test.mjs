@@ -94,3 +94,21 @@ test("file processing never presents itself as a web crawl and history is a real
   assert.match(documents, /invokeDocumentProcessor/);
   assert.match(packageJson, /dev:processor/);
 });
+
+test("TXT titles, local development login and server-side ownership are covered", async () => {
+  const [page, documents, auth, api] = await Promise.all([
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("worker/documents.ts", root), "utf8"),
+    readFile(new URL("worker/auth.ts", root), "utf8"),
+    readFile(new URL("public/openapi.yaml", root), "utf8"),
+  ]);
+  assert.match(page, /"TXT"/);
+  assert.match(page, /进入本地私有空间/);
+  assert.match(documents, /ACCEPTED_EXTENSIONS = new Set\(\["docx", "md", "txt"/);
+  assert.match(documents, /getAuthenticatedActor/);
+  assert.match(documents, /local_sessions/);
+  assert.match(auth, /HttpOnly/);
+  assert.match(auth, /local-signin/);
+  assert.match(api, /\/v1\/auth\/me:/);
+  assert.match(api, /TXT/);
+});

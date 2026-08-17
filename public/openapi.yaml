@@ -8,6 +8,7 @@ servers:
 security:
   - bearerAuth: []
 tags:
+  - { name: Authentication }
   - { name: Uploads }
   - { name: Documents }
   - { name: Jobs }
@@ -15,6 +16,55 @@ tags:
   - { name: TTS }
   - { name: Knowledge }
 paths:
+  /v1/auth/me:
+    get:
+      security: []
+      tags: [Authentication]
+      summary: Get the current platform-authenticated user or local development session
+      operationId: getCurrentUser
+      responses:
+        '200':
+          description: Current authentication state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthState' }
+  /v1/auth/local-signin:
+    post:
+      security: []
+      tags: [Authentication]
+      summary: Create a localhost-only development session; unavailable on deployed Sites
+      operationId: localSignIn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, display_name]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                display_name: { type: string, minLength: 1, maxLength: 80 }
+      responses:
+        '201':
+          description: Local session created
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthState' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/auth/local-signout:
+    post:
+      security: []
+      tags: [Authentication]
+      summary: End the localhost-only development session
+      operationId: localSignOut
+      responses:
+        '200':
+          description: Local session cleared
+        '403': { $ref: '#/components/responses/Problem' }
   /v1/assets/uploads:
     post:
       tags: [Uploads]
@@ -51,7 +101,7 @@ paths:
                 file:
                   type: string
                   format: binary
-                  description: DOCX, MD, PDF or XLSX; maximum 200 MB.
+                  description: DOCX, MD, TXT, PDF or XLSX; maximum 200 MB.
       responses:
         '201':
           description: Document processed and persisted
@@ -437,6 +487,26 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
   schemas:
+    AuthUser:
+      type: object
+      required: [id, tenant_id, display_name, email, auth_mode]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        display_name: { type: string }
+        email: { type: [string, 'null'], format: email }
+        auth_mode: { type: string, enum: [platform, local] }
+    AuthState:
+      type: object
+      required: [authenticated, user, local_development, sign_in_url]
+      properties:
+        authenticated: { type: boolean }
+        user:
+          oneOf:
+            - { $ref: '#/components/schemas/AuthUser' }
+            - { type: 'null' }
+        local_development: { type: boolean }
+        sign_in_url: { type: [string, 'null'], format: uri-reference }
     CreateUploadRequest:
       type: object
       additionalProperties: false

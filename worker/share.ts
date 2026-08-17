@@ -1,4 +1,4 @@
-import { ensureDocumentStore, getActor, type DocumentEnv } from "./documents";
+import { ensureDocumentStore, getAuthenticatedActor, type DocumentEnv } from "./documents";
 import { isReaderDocument } from "./reader";
 
 interface ShareDocumentRow {
@@ -95,7 +95,7 @@ export async function handleShareRequest(request: Request, env: DocumentEnv): Pr
     return json({ reader, allow_download: Boolean(share.allow_download), expires_at: share.expires_at });
   }
 
-  const actor = getActor(request);
+  const actor = await getAuthenticatedActor(request, env);
   if (!actor) return error("请先登录后再管理分享链接。", 401, "UNAUTHENTICATED");
   const match = url.pathname.match(/^\/api\/documents\/([0-9a-f-]{36})\/shares(?:\/([0-9a-f-]{36}))?$/i);
   if (!match) return error("未知的分享接口。", 404, "NOT_FOUND");
