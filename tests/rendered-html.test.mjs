@@ -105,6 +105,8 @@ test("TXT titles, local account registration and server-side ownership are cover
   assert.match(page, /"TXT"/);
   assert.match(page, /注册并进入私有空间/);
   assert.match(page, /退出登录/);
+  assert.match(page, /上传、网页抓取、知识库、下载和分享都仅在身份验证后可用/);
+  assert.match(page, /if \(!currentUser\)/);
   assert.match(documents, /ACCEPTED_EXTENSIONS = new Set\(\["docx", "md", "txt"/);
   assert.match(documents, /getAuthenticatedActor/);
   assert.match(documents, /local_sessions/);

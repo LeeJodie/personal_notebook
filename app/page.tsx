@@ -236,6 +236,7 @@ export default function Home() {
       setCurrentUser(result.user);
       setLoginOpen(false);
       setLoginPassword("");
+      setView("create");
       setNotice(`已进入 ${result.user.display_name} 的私有空间。`);
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "登录失败，请稍后重试。");
@@ -264,6 +265,7 @@ export default function Home() {
       setLoginOpen(false);
       setLoginPassword("");
       setLoginPasswordConfirmation("");
+      setView("create");
       setNotice(`欢迎 ${result.user.display_name}，你的私有空间已创建。`);
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "注册失败，请稍后重试。");
@@ -819,6 +821,48 @@ export default function Home() {
     </main>
   );
 
+  const renderAuthCard = (required = false) => (
+    <section className={`auth-dialog${required ? " auth-dialog-required" : ""}`} role="dialog" aria-modal={!required} aria-labelledby="login-title">
+      {!required && <button className="auth-close" onClick={() => setLoginOpen(false)} aria-label="关闭登录窗口">×</button>}
+      <p className="overline">私有空间</p>
+      <h2 id="login-title">{localDevelopment && localAuthMode === "register" ? "创建你的私有空间" : "登录后管理你的资料"}</h2>
+      <p>文档、H5、知识检索与分享记录均按登录用户在服务端隔离。</p>
+      {localDevelopment ? <>
+        <div className="auth-mode-tabs" role="tablist" aria-label="账号操作">
+          <button className={localAuthMode === "signin" ? "active" : ""} onClick={() => { setLocalAuthMode("signin"); setLoginError(""); }} role="tab" aria-selected={localAuthMode === "signin"}>登录</button>
+          <button className={localAuthMode === "register" ? "active" : ""} onClick={() => { setLocalAuthMode("register"); setLoginError(""); }} role="tab" aria-selected={localAuthMode === "register"}>注册</button>
+        </div>
+        <form onSubmit={(event) => { event.preventDefault(); void (localAuthMode === "register" ? registerLocal() : signInLocal()); }}>
+          {localAuthMode === "register" && <label>显示名称<input value={loginName} onChange={(event) => setLoginName(event.target.value)} maxLength={80} autoComplete="name" required /></label>}
+          <label>邮箱<input type="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} maxLength={254} autoComplete="email" required /></label>
+          <label>密码<input type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} minLength={8} maxLength={128} autoComplete={localAuthMode === "register" ? "new-password" : "current-password"} required /></label>
+          {localAuthMode === "register" && <label>确认密码<input type="password" value={loginPasswordConfirmation} onChange={(event) => setLoginPasswordConfirmation(event.target.value)} minLength={8} maxLength={128} autoComplete="new-password" required /></label>}
+          {loginError && <small className="auth-error" role="alert">{loginError}</small>}
+          <button className="primary-button" disabled={loginSubmitting}>{loginSubmitting ? "正在处理…" : localAuthMode === "register" ? "注册并进入私有空间" : "登录私有空间"}</button>
+        </form>
+        <p className="auth-switch">{localAuthMode === "register" ? "已有账号？" : "还没有账号？"}<button onClick={() => { setLocalAuthMode(localAuthMode === "register" ? "signin" : "register"); setLoginError(""); }}>{localAuthMode === "register" ? "去登录" : "立即注册"}</button></p>
+        <small className="auth-hint">本机账号仅用于 localhost 隔离测试；密码经不可逆派生后存储。部署后使用 ChatGPT 登录。</small>
+      </> : <>
+        <button className="primary-button" onClick={() => { if (signInUrl) window.location.assign(signInUrl); }} disabled={!signInUrl}>使用 ChatGPT 登录</button>
+        <small className="auth-hint">平台会验证身份，应用不会保存你的登录密码。</small>
+      </>}
+    </section>
+  );
+
+  if (!authReady) {
+    return <div className="app-shell auth-gate-shell"><main className="auth-loading" aria-live="polite"><Wordmark /><p>正在验证登录状态…</p></main></div>;
+  }
+
+  if (!currentUser) {
+    return <div className="app-shell auth-gate-shell">
+      <header className="auth-gate-header"><Wordmark /><span>私有知识库 · 安全阅读</span></header>
+      <main className="auth-gate">
+        <section className="auth-gate-copy"><p className="overline">声阅 · 私有内容工作台</p><h1>先登录，再让资料<br />成为会朗读的网页。</h1><p>上传、网页抓取、知识库、下载和分享都仅在身份验证后可用。每份资料都会归入你的私有空间。</p><div><span>用户级隔离</span><span>私有文件存储</span><span>可撤销分享</span></div></section>
+        {renderAuthCard(true)}
+      </main>
+    </div>;
+  }
+
   return (
     <div className={`app-shell view-${view}`}>
       <header className="app-header">
@@ -829,7 +873,7 @@ export default function Home() {
           <button className={view === "history" ? "active" : ""} onClick={openHistory}><AppIcon name="clock" />处理记录</button>
           <button className={view === "api" ? "active" : ""} onClick={() => setView("api")}><AppIcon name="code" />API 文档</button>
         </nav>
-        <div className="header-actions"><button className="demo-link" onClick={() => { setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button>{currentUser ? <div className="account-summary"><span className="avatar" aria-hidden="true">{currentUser.display_name.slice(0, 2).toUpperCase()}<i /></span><span className="account-name" title={currentUser.email || currentUser.display_name}>{currentUser.display_name}</span><button className="logout-button" onClick={() => void signOut()}>退出登录</button></div> : <button className="login-button" onClick={() => { setLocalAuthMode("signin"); setLoginError(""); setLoginOpen(true); }} disabled={!authReady}>{authReady ? "登录 / 注册" : "验证中…"}</button>}</div>
+        <div className="header-actions"><button className="demo-link" onClick={() => { if (!requireLogin()) return; setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button><div className="account-summary"><span className="avatar" aria-hidden="true">{currentUser.display_name.slice(0, 2).toUpperCase()}<i /></span><span className="account-name" title={currentUser.email || currentUser.display_name}>{currentUser.display_name}</span><button className="logout-button" onClick={() => void signOut()}>退出登录</button></div></div>
       </header>
       {view === "create" && renderCreate()}
       {view === "processing" && renderProcessing()}
@@ -838,7 +882,7 @@ export default function Home() {
       {view === "history" && renderHistory()}
       {view === "api" && renderApi()}
       {view === "create" && <footer><span>© 2026 声阅</span><span>隐私保护 · 数据安全 · 服务状态</span><span><i /> 全部系统正常</span></footer>}
-      {loginOpen && <div className="auth-backdrop" role="presentation"><section className="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="login-title"><button className="auth-close" onClick={() => setLoginOpen(false)} aria-label="关闭登录窗口">×</button><p className="overline">私有空间</p><h2 id="login-title">{localDevelopment && localAuthMode === "register" ? "创建你的私有空间" : "登录后管理你的资料"}</h2><p>文档、H5、知识检索与分享记录均按登录用户在服务端隔离。</p>{localDevelopment ? <><div className="auth-mode-tabs" role="tablist" aria-label="账号操作"><button className={localAuthMode === "signin" ? "active" : ""} onClick={() => { setLocalAuthMode("signin"); setLoginError(""); }} role="tab" aria-selected={localAuthMode === "signin"}>登录</button><button className={localAuthMode === "register" ? "active" : ""} onClick={() => { setLocalAuthMode("register"); setLoginError(""); }} role="tab" aria-selected={localAuthMode === "register"}>注册</button></div><form onSubmit={(event) => { event.preventDefault(); void (localAuthMode === "register" ? registerLocal() : signInLocal()); }}>{localAuthMode === "register" && <label>显示名称<input value={loginName} onChange={(event) => setLoginName(event.target.value)} maxLength={80} autoComplete="name" required /></label>}<label>邮箱<input type="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} maxLength={254} autoComplete="email" required /></label><label>密码<input type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} minLength={8} maxLength={128} autoComplete={localAuthMode === "register" ? "new-password" : "current-password"} required /></label>{localAuthMode === "register" && <label>确认密码<input type="password" value={loginPasswordConfirmation} onChange={(event) => setLoginPasswordConfirmation(event.target.value)} minLength={8} maxLength={128} autoComplete="new-password" required /></label>}{loginError && <small className="auth-error" role="alert">{loginError}</small>}<button className="primary-button" disabled={loginSubmitting}>{loginSubmitting ? "正在处理…" : localAuthMode === "register" ? "注册并进入私有空间" : "登录私有空间"}</button></form><p className="auth-switch">{localAuthMode === "register" ? "已有账号？" : "还没有账号？"}<button onClick={() => { setLocalAuthMode(localAuthMode === "register" ? "signin" : "register"); setLoginError(""); }}>{localAuthMode === "register" ? "去登录" : "立即注册"}</button></p><small className="auth-hint">本机账号仅用于 localhost 隔离测试；密码经不可逆派生后存储。部署后使用 ChatGPT 登录。</small></> : <><button className="primary-button" onClick={() => { if (signInUrl) window.location.assign(signInUrl); }} disabled={!signInUrl}>使用 ChatGPT 登录</button><small className="auth-hint">平台会验证身份，应用不会保存你的登录密码。</small></>}</section></div>}
+      {loginOpen && <div className="auth-backdrop" role="presentation">{renderAuthCard()}</div>}
     </div>
   );
 }
