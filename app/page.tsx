@@ -5,6 +5,7 @@ import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
 type View = "create" | "processing" | "reader" | "library" | "history" | "api";
 type SourceType = "file" | "url";
 type LocalAuthMode = "signin" | "register";
+type TtsPlaybackState = "idle" | "synthesizing" | "playing";
 
 interface ReaderSection {
   id: string;
@@ -63,6 +64,11 @@ interface PrivateTtsVoice {
 }
 
 const supportedExtensions = ["DOCX", "MD", "TXT", "XLSX", "PDF"];
+// The local 300M CosyVoice model is intentionally fed short segments.
+// It reduces the first wait on a CPU-only development machine; production
+// GPU deployments can raise this without changing the public TTS API contract.
+const COSYVOICE_SEGMENT_CHARS = 12;
+const TTS_VOICE_VALUE_SEPARATOR = "\u001f";
 
 const demoDocument: ReaderDocument = {
   title: "智能阅读项目建设方案",
@@ -139,6 +145,7 @@ export default function Home() {
   const [privateTtsVoices, setPrivateTtsVoices] = useState<PrivateTtsVoice[]>([]);
   const [ttsProvider, setTtsProvider] = useState<"browser" | "cosyvoice">("browser");
   const [speaking, setSpeaking] = useState(false);
+  const [ttsPlaybackState, setTtsPlaybackState] = useState<TtsPlaybackState>("idle");
   const [speechProgress, setSpeechProgress] = useState(0);
   const [notice, setNotice] = useState("");
   const [readerDocument, setReaderDocument] = useState<ReaderDocument>(demoDocument);
@@ -172,8 +179,9 @@ export default function Home() {
   const [loginSubmitting, setLoginSubmitting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrlRef = useRef<string | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const privateProgressFrameRef = useRef<number | null>(null);
   const ttsAbortRef = useRef<AbortController | null>(null);
   const speechOffsetRef = useRef(0);
   const speechSessionRef = useRef(0);
@@ -183,6 +191,7 @@ export default function Home() {
     () => [readerDocument.title, readerDocument.description, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])].join("。"),
     [readerDocument],
   );
+  const isCosySynthesizing = speaking && ttsProvider === "cosyvoice" && ttsPlaybackState === "synthesizing";
 
   useEffect(() => {
     if (!("speechSynthesis" in window)) return;
@@ -210,8 +219,8 @@ export default function Home() {
   useEffect(() => () => {
     window.speechSynthesis?.cancel();
     ttsAbortRef.current?.abort();
-    audioRef.current?.pause();
-    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+    audioSourceRef.current?.stop();
+    audioContextRef.current?.close();
   }, []);
 
   useEffect(() => {
@@ -238,8 +247,6 @@ export default function Home() {
       .then(({ response, result }) => {
         if (!active || !response.ok || !Array.isArray(result.items) || !result.items.length) return;
         setPrivateTtsVoices(result.items);
-        setTtsProvider("cosyvoice");
-        setVoiceName(result.items[0].id);
       })
       .catch(() => { if (active) setTtsProvider("browser"); });
     return () => { active = false; };
@@ -458,10 +465,31 @@ export default function Home() {
   };
 
   const clearPrivateAudio = () => {
-    audioRef.current?.pause();
-    audioRef.current = null;
-    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
-    audioUrlRef.current = null;
+    if (privateProgressFrameRef.current !== null) window.cancelAnimationFrame(privateProgressFrameRef.current);
+    privateProgressFrameRef.current = null;
+    const source = audioSourceRef.current;
+    audioSourceRef.current = null;
+    if (!source) return;
+    source.onended = null;
+    try {
+      source.stop();
+    } catch {
+      // A finished AudioBufferSourceNode cannot be stopped again.
+    }
+    source.disconnect();
+  };
+
+  const preparePrivateAudio = () => {
+    if (!("AudioContext" in window)) {
+      setNotice("当前浏览器不支持私有音频播放，请切换到浏览器语音。");
+      return null;
+    }
+    const context = audioContextRef.current || new AudioContext();
+    audioContextRef.current = context;
+    // Resume within the click handler. The actual CosyVoice response may take
+    // longer than a browser's transient user-activation window on local CPU.
+    if (context.state === "suspended") void context.resume().catch(() => setNotice("浏览器未允许音频播放，请再次点击朗读。"));
+    return context;
   };
 
   const stopSpeech = (resetProgress = false) => {
@@ -472,6 +500,7 @@ export default function Home() {
     window.speechSynthesis?.cancel();
     utteranceRef.current = null;
     setSpeaking(false);
+    setTtsPlaybackState("idle");
     if (resetProgress) {
       speechOffsetRef.current = 0;
       setSpeechProgress(0);
@@ -501,21 +530,27 @@ export default function Home() {
       if (speechSessionRef.current !== session) return;
       speechOffsetRef.current = articleText.length;
       setSpeaking(false);
+      setTtsPlaybackState("idle");
       setSpeechProgress(100);
     };
     utterance.onerror = () => {
-      if (speechSessionRef.current === session) setSpeaking(false);
+      if (speechSessionRef.current === session) {
+        setSpeaking(false);
+        setTtsPlaybackState("idle");
+      }
     };
     utteranceRef.current = utterance;
     window.speechSynthesis.speak(utterance);
     setSpeaking(true);
+    setTtsPlaybackState("playing");
   };
 
-  const playCosySegment = async (offset: number, selectedVoice: string, session: number) => {
-    const segment = articleText.slice(offset, offset + 1_500);
+  const playCosySegment = async (offset: number, selectedVoice: string, session: number, audioContext: AudioContext) => {
+    const segment = articleText.slice(offset, offset + COSYVOICE_SEGMENT_CHARS);
     if (!segment || speechSessionRef.current !== session) return;
     const controller = new AbortController();
     ttsAbortRef.current = controller;
+    setTtsPlaybackState("synthesizing");
     try {
       const response = await fetch("/v1/tts/synthesize", {
         method: "POST",
@@ -527,42 +562,46 @@ export default function Home() {
         const result = await response.json().catch(() => ({})) as { message?: string };
         throw new Error(result.message || "CosyVoice 合成失败。");
       }
-      const audioUrl = URL.createObjectURL(await response.blob());
+      const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
       if (speechSessionRef.current !== session) {
-        URL.revokeObjectURL(audioUrl);
         return;
       }
       clearPrivateAudio();
-      audioUrlRef.current = audioUrl;
-      const audio = new Audio(audioUrl);
-      audioRef.current = audio;
-      audio.ontimeupdate = () => {
-        if (speechSessionRef.current !== session || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
-        const absoluteOffset = Math.min(articleText.length, offset + Math.round(segment.length * (audio.currentTime / audio.duration)));
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      audioSourceRef.current = source;
+      const startedAt = audioContext.currentTime;
+      const updateProgress = () => {
+        if (speechSessionRef.current !== session || audioSourceRef.current !== source || audioBuffer.duration <= 0) return;
+        const elapsed = Math.min(audioBuffer.duration, Math.max(0, audioContext.currentTime - startedAt));
+        const absoluteOffset = Math.min(articleText.length, offset + Math.round(segment.length * (elapsed / audioBuffer.duration)));
         speechOffsetRef.current = absoluteOffset;
         setSpeechProgress(Math.min(100, Math.round((absoluteOffset / articleText.length) * 100)));
+        if (elapsed < audioBuffer.duration) privateProgressFrameRef.current = window.requestAnimationFrame(updateProgress);
       };
-      audio.onended = () => {
+      source.onended = () => {
         if (speechSessionRef.current !== session) return;
+        if (privateProgressFrameRef.current !== null) window.cancelAnimationFrame(privateProgressFrameRef.current);
+        privateProgressFrameRef.current = null;
+        if (audioSourceRef.current === source) audioSourceRef.current = null;
         const nextOffset = offset + segment.length;
         speechOffsetRef.current = Math.min(articleText.length, nextOffset);
         setSpeechProgress(Math.min(100, Math.round((speechOffsetRef.current / articleText.length) * 100)));
         if (nextOffset >= articleText.length) {
           setSpeaking(false);
+          setTtsPlaybackState("idle");
           return;
         }
-        void playCosySegment(nextOffset, selectedVoice, session);
+        void playCosySegment(nextOffset, selectedVoice, session, audioContext);
       };
-      audio.onerror = () => {
-        if (speechSessionRef.current === session) {
-          setSpeaking(false);
-          setNotice("CosyVoice 音频播放失败，已停止朗读。");
-        }
-      };
-      await audio.play();
+      source.start();
+      setTtsPlaybackState("playing");
+      updateProgress();
     } catch (error) {
       if (controller.signal.aborted || speechSessionRef.current !== session) return;
       setSpeaking(false);
+      setTtsPlaybackState("idle");
       setNotice(error instanceof Error ? error.message : "CosyVoice 服务暂不可用。");
     } finally {
       if (ttsAbortRef.current === controller) ttsAbortRef.current = null;
@@ -574,6 +613,8 @@ export default function Home() {
       setNotice("CosyVoice 音色尚未就绪，请稍后再试。");
       return;
     }
+    const audioContext = preparePrivateAudio();
+    if (!audioContext) return;
     const offset = requestedOffset >= articleText.length ? 0 : Math.max(0, requestedOffset);
     const session = speechSessionRef.current + 1;
     speechSessionRef.current = session;
@@ -583,7 +624,8 @@ export default function Home() {
     speechOffsetRef.current = offset;
     setSpeechProgress(Math.round((offset / articleText.length) * 100));
     setSpeaking(true);
-    void playCosySegment(offset, selectedVoice, session);
+    setTtsPlaybackState("synthesizing");
+    void playCosySegment(offset, selectedVoice, session, audioContext);
   };
 
   const playSpeech = () => {
@@ -598,14 +640,24 @@ export default function Home() {
     speakFromOffset(speechProgress >= 100 ? 0 : speechOffsetRef.current);
   };
 
-  const changeVoice = (nextVoice: string) => {
+  const changeVoice = (nextVoice: string, nextProvider = ttsProvider) => {
+    setTtsProvider(nextProvider);
     setVoiceName(nextVoice);
     if (!speaking) return;
-    if (ttsProvider === "cosyvoice" && privateTtsVoices.length) {
+    if (nextProvider === "cosyvoice" && privateTtsVoices.length) {
       speakWithCosyVoice(speechOffsetRef.current, nextVoice);
       return;
     }
     speakFromOffset(speechOffsetRef.current, nextVoice);
+  };
+
+  const selectVoice = (value: string) => {
+    const separatorIndex = value.indexOf(TTS_VOICE_VALUE_SEPARATOR);
+    if (separatorIndex < 0) return;
+    const provider = value.slice(0, separatorIndex);
+    const voice = value.slice(separatorIndex + TTS_VOICE_VALUE_SEPARATOR.length);
+    if ((provider !== "browser" && provider !== "cosyvoice") || !voice) return;
+    changeVoice(voice, provider);
   };
 
   const downloadOriginal = () => {
@@ -883,9 +935,9 @@ export default function Home() {
         </section>}
       </div>
       <div className="tts-player">
-        <button className="play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
-        <div className="track-info"><div><strong>{speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "cosyvoice" ? "CosyVoice" : "浏览器语音"}</strong><span>{readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className="audio-progress"><span style={{ width: `${speechProgress}%` }} /></div></div>
-        <div className="voice-select"><label htmlFor="voice">音色 {ttsProvider === "cosyvoice" ? "· 私有模型" : "· 系统"}</label><select id="voice" value={voiceName} onChange={(event) => changeVoice(event.target.value)}>{ttsProvider === "cosyvoice" && privateTtsVoices.length ? privateTtsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label} · {voice.language}</option>) : voices.length ? voices.slice(0, 12).map((voice) => <option key={`${voice.name}-${voice.lang}`} value={voice.name}>{voice.name} · {voice.lang}</option>) : <option>系统默认音色</option>}</select></div>
+        <button className="play-button" onClick={playSpeech} aria-label={speaking ? (isCosySynthesizing ? "取消生成" : "暂停播放") : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
+        <div className="track-info"><div><strong>{isCosySynthesizing ? "正在生成音频 · " : speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "cosyvoice" ? "CosyVoice" : "浏览器语音"}</strong><span>{isCosySynthesizing ? "本机正在合成短语音片段，点击暂停可取消" : readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className={`audio-progress${isCosySynthesizing ? " is-synthesizing" : ""}`}><span style={{ width: `${speechProgress}%` }} /></div></div>
+        <div className="voice-select"><label htmlFor="voice">音色 {ttsProvider === "cosyvoice" ? "· 私有模型" : "· 即时语音"}</label><select id="voice" value={`${ttsProvider}${TTS_VOICE_VALUE_SEPARATOR}${voiceName}`} onChange={(event) => selectVoice(event.target.value)}>{voices.length ? <optgroup label="浏览器即时语音">{voices.slice(0, 12).map((voice) => <option key={`browser-${voice.name}-${voice.lang}`} value={`browser${TTS_VOICE_VALUE_SEPARATOR}${voice.name}`}>{voice.name} · {voice.lang}</option>)}</optgroup> : <option value={`browser${TTS_VOICE_VALUE_SEPARATOR}system-default`}>系统默认音色</option>}{privateTtsVoices.length ? <optgroup label="CosyVoice 私有模型（CPU 本机较慢）">{privateTtsVoices.map((voice) => <option key={`cosyvoice-${voice.id}`} value={`cosyvoice${TTS_VOICE_VALUE_SEPARATOR}${voice.id}`}>{voice.label} · {voice.language}</option>)}</optgroup> : null}</select></div>
         <span className="speed-pill">1.0×</span>
       </div>
       {notice && <button className="toast" onClick={() => setNotice("")} aria-label="关闭提示">{notice}<span>×</span></button>}

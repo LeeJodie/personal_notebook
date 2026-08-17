@@ -76,6 +76,7 @@ export async function handleTtsRequest(request: Request, env: TtsEnv): Promise<R
         method: "POST",
         headers,
         body: JSON.stringify({ text, voice_id: voiceId, speed }),
+        signal: request.signal,
       });
       if (!response.ok) return upstreamProblem(response);
       return passAudio(response);

@@ -171,6 +171,7 @@ def health() -> dict[str, Any]:
         "status": "ready" if cosyvoice is not None else "starting",
         "provider": "CosyVoice",
         "model": MODEL_DIR.name,
+        "accelerator": str(cosyvoice.model.device) if cosyvoice is not None else None,
         "voice_count": len(cosyvoice.list_available_spks()) if cosyvoice is not None else 0,
     }
 
