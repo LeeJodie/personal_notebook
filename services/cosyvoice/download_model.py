@@ -1,11 +1,17 @@
 """Download the official multi-speaker CosyVoice model into this project."""
 
+import os
 from pathlib import Path
-
-from modelscope import snapshot_download
 
 SERVICE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = SERVICE_DIR / "models" / "CosyVoice-300M-SFT"
+MODELSCOPE_CACHE_DIR = SERVICE_DIR / "modelscope-cache"
+
+# The frontend uses wetext for text normalisation. Keep it within the same
+# package so a deployed service does not need internet access on first start.
+os.environ.setdefault("MODELSCOPE_CACHE", str(MODELSCOPE_CACHE_DIR))
+
+from modelscope import snapshot_download
 
 # `CosyVoice` defaults to Python/PyTorch inference in this project.  The
 # ModelScope snapshot also contains optional JIT and TensorRT artefacts, which
@@ -28,4 +34,5 @@ if __name__ == "__main__":
         local_dir=str(MODEL_DIR),
         allow_patterns=RUNTIME_FILES,
     )
+    snapshot_download("pengzhendong/wetext")
     print(f"CosyVoice model ready: {MODEL_DIR}")

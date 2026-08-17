@@ -44,4 +44,6 @@ yarn-error.log*
 /services/cosyvoice/CosyVoice/
 /services/cosyvoice/.venv/
 /services/cosyvoice/models/
+/services/cosyvoice/modelscope-cache/
+/services/cosyvoice/huggingface-cache/
 /services/cosyvoice/__pycache__/

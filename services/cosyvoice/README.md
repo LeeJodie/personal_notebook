@@ -4,6 +4,7 @@
 
 - `CosyVoice/`：从 `QwenAudio/CosyVoice` 克隆的官方源码（本地部署资产，不提交主仓库）。
 - `models/CosyVoice-300M-SFT/`：官方 ModelScope 多说话人模型（本地部署资产，不提交主仓库）。
+- `modelscope-cache/`：CosyVoice 的官方 wetext 文本规范化资源（本地部署资产，不提交主仓库）。
 - `.venv/`：项目内 Python 3.10 运行环境（本地部署资产，不提交主仓库）。
 - `server.py`：仅供声阅 Worker 调用的适配服务；提供 `/health`、`/v1/voices` 和 `/v1/synthesize`。
 
@@ -35,5 +36,11 @@ npm run dev
 ## 生产部署
 
 部署为无公网入口的 GPU 服务，并配置 Sites 私有 HTTP 绑定 `CUSTOMER_HTTP_TTS`。Worker 只通过 `http://tts.internal` 访问它，浏览器不会直接接触服务端口。生产环境应使用 NVIDIA GPU、限制单实例并发、设置请求大小与超时，并按 GPU 副本数扩容；Apple 芯片本机模式仅适合功能体验和调试，不适合作为 200 并发的生产节点。
+
+构建含模型的私有镜像：
+
+```bash
+docker build -f services/cosyvoice/Dockerfile -t shengyue-cosyvoice services/cosyvoice
+```
 
 官方 CosyVoice 仓库与模型遵循其各自的许可证及使用条款；上线前应按企业的模型许可与音色授权流程审查。

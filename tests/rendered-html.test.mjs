@@ -72,6 +72,7 @@ test("reader exposes H5 download, private CosyVoice and a revocable share link",
   assert.match(ttsWorker, /\/v1\/synthesize/);
   assert.match(cosyVoice, /inference_sft/);
   assert.match(cosyVoice, /list_available_spks/);
+  assert.match(cosyVoice, /use_project_wetext_cache/);
 });
 
 test("backend includes durable document parsing and private knowledge boundaries", async () => {
