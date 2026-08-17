@@ -28,11 +28,40 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AuthState' }
+  /v1/auth/local-register:
+    post:
+      security: []
+      tags: [Authentication]
+      summary: Register a localhost-only development account and create a session; unavailable on deployed Sites
+      operationId: localRegister
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, display_name, password]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                display_name: { type: string, minLength: 1, maxLength: 80 }
+                password: { type: string, format: password, minLength: 8, maxLength: 128, writeOnly: true }
+      responses:
+        '201':
+          description: Local account and session created
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthState' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
   /v1/auth/local-signin:
     post:
       security: []
       tags: [Authentication]
-      summary: Create a localhost-only development session; unavailable on deployed Sites
+      summary: Sign in to a localhost-only development account; unavailable on deployed Sites
       operationId: localSignIn
       requestBody:
         required: true
@@ -41,20 +70,20 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [email, display_name]
+              required: [email, password]
               properties:
                 email: { type: string, format: email, maxLength: 254 }
-                display_name: { type: string, minLength: 1, maxLength: 80 }
+                password: { type: string, format: password, minLength: 8, maxLength: 128, writeOnly: true }
       responses:
-        '201':
+        '200':
           description: Local session created
           headers:
             Set-Cookie: { schema: { type: string } }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AuthState' }
+        '401': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
-        '422': { $ref: '#/components/responses/Problem' }
   /v1/auth/local-signout:
     post:
       security: []

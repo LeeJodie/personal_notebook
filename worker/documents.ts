@@ -123,21 +123,33 @@ export function isLocalDevelopmentRequest(request: Request): boolean {
 export async function ensureDocumentStore(env: Pick<DocumentEnv, "DB">): Promise<void> {
   const current = initializedStores.get(env.DB);
   if (current) return current;
-  const initialization = env.DB.batch([
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL, source_url TEXT, filename TEXT, media_type TEXT, size_bytes INTEGER, status TEXT NOT NULL DEFAULT 'queued', progress INTEGER NOT NULL DEFAULT 0, word_count INTEGER NOT NULL DEFAULT 0, reader_json TEXT, original_key TEXT, h5_key TEXT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
-    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_documents_owner_updated ON documents (tenant_id, owner_user_id, updated_at)"),
-    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents (status, updated_at)"),
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS document_chunks (id TEXT PRIMARY KEY NOT NULL, document_id TEXT NOT NULL, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, section_title TEXT NOT NULL DEFAULT '', ordinal INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)"),
-    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_chunks_owner_document ON document_chunks (tenant_id, owner_user_id, document_id, ordinal)"),
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS document_shares (id TEXT PRIMARY KEY NOT NULL, document_id TEXT NOT NULL, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, token_hash TEXT NOT NULL, allow_download INTEGER NOT NULL DEFAULT 1, expires_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, revoked_at TEXT)"),
-    env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_token_hash ON document_shares (token_hash)"),
-    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_shares_document_status ON document_shares (document_id, status, expires_at)"),
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS local_users (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL, display_name TEXT NOT NULL, created_at TEXT NOT NULL)"),
-    env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_local_users_email ON local_users (email)"),
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS local_sessions (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, token_hash TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)"),
-    env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_local_sessions_token_hash ON local_sessions (token_hash)"),
-    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_local_sessions_user_expiry ON local_sessions (user_id, expires_at)"),
-  ]).then(() => undefined);
+  const initialization = (async () => {
+    await env.DB.batch([
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL, source_url TEXT, filename TEXT, media_type TEXT, size_bytes INTEGER, status TEXT NOT NULL DEFAULT 'queued', progress INTEGER NOT NULL DEFAULT 0, word_count INTEGER NOT NULL DEFAULT 0, reader_json TEXT, original_key TEXT, h5_key TEXT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_documents_owner_updated ON documents (tenant_id, owner_user_id, updated_at)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents (status, updated_at)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS document_chunks (id TEXT PRIMARY KEY NOT NULL, document_id TEXT NOT NULL, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, section_title TEXT NOT NULL DEFAULT '', ordinal INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_chunks_owner_document ON document_chunks (tenant_id, owner_user_id, document_id, ordinal)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS document_shares (id TEXT PRIMARY KEY NOT NULL, document_id TEXT NOT NULL, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, token_hash TEXT NOT NULL, allow_download INTEGER NOT NULL DEFAULT 1, expires_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, revoked_at TEXT)"),
+      env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_token_hash ON document_shares (token_hash)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_shares_document_status ON document_shares (document_id, status, expires_at)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS local_users (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL, display_name TEXT NOT NULL, password_hash TEXT, password_salt TEXT, password_updated_at TEXT, created_at TEXT NOT NULL)"),
+      env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_local_users_email ON local_users (email)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS local_sessions (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, token_hash TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)"),
+      env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_local_sessions_token_hash ON local_sessions (token_hash)"),
+      env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_local_sessions_user_expiry ON local_sessions (user_id, expires_at)"),
+    ]);
+    const columns = await env.DB.prepare("PRAGMA table_info(local_users)").all<{ name: string }>();
+    const existing = new Set(columns.results.map((column) => column.name));
+    const additions = [
+      ["password_hash", "ALTER TABLE local_users ADD COLUMN password_hash TEXT"],
+      ["password_salt", "ALTER TABLE local_users ADD COLUMN password_salt TEXT"],
+      ["password_updated_at", "ALTER TABLE local_users ADD COLUMN password_updated_at TEXT"],
+    ] as const;
+    for (const [column, statement] of additions) {
+      if (!existing.has(column)) await env.DB.prepare(statement).run();
+    }
+  })();
   initializedStores.set(env.DB, initialization);
   return initialization;
 }

@@ -50,7 +50,7 @@ const worker = {
     if (url.pathname === "/v1/documents:upload") {
       return handleDocumentRequest(withPath(request, "/api/documents/upload"), env);
     }
-    if (url.pathname === "/v1/auth/me" || url.pathname === "/v1/auth/local-signin" || url.pathname === "/v1/auth/local-signout") {
+    if (url.pathname === "/v1/auth/me" || url.pathname === "/v1/auth/local-register" || url.pathname === "/v1/auth/local-signin" || url.pathname === "/v1/auth/local-signout") {
       return handleAuthRequest(withPath(request, url.pathname.replace(/^\/v1/, "/api")), env);
     }
     if (url.pathname === "/v1/documents:import-url") {
@@ -69,7 +69,7 @@ const worker = {
       return handleCrawlRequest(request, env);
     }
 
-    if (url.pathname === "/api/auth/me" || url.pathname === "/api/auth/local-signin" || url.pathname === "/api/auth/local-signout") {
+    if (url.pathname === "/api/auth/me" || url.pathname === "/api/auth/local-register" || url.pathname === "/api/auth/local-signin" || url.pathname === "/api/auth/local-signout") {
       return handleAuthRequest(request, env);
     }
 

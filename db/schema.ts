@@ -61,6 +61,9 @@ export const localUsers = sqliteTable("local_users", {
   id: text("id").primaryKey(),
   email: text("email").notNull(),
   displayName: text("display_name").notNull(),
+  passwordHash: text("password_hash"),
+  passwordSalt: text("password_salt"),
+  passwordUpdatedAt: text("password_updated_at"),
   createdAt: text("created_at").notNull(),
 }, (table) => [
   uniqueIndex("idx_local_users_email").on(table.email),
