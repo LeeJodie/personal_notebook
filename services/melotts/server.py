@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import threading
+import unicodedata
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,8 @@ prepare_runtime(SERVICE_DIR)
 
 melo_tts: Any | None = None
 inference_lock = threading.Lock()
+URL_PATTERN = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
+UNSUPPORTED_TEXT_PATTERN = re.compile(r"[^\u4e00-\u9fa5A-Za-z0-9\s!?…,.\-']+")
 
 
 class SynthesisRequest(BaseModel):
@@ -65,15 +69,37 @@ def local_model_paths() -> tuple[str, str]:
     return str(config_path), str(checkpoint_path)
 
 
+def normalize_synthesis_text(text: str) -> str:
+    """Limit input to the characters accepted by MeloTTS's Chinese frontend.
+
+    Converted documents frequently contain source URLs, decorative glyphs and
+    office-format control characters.  MeloTTS's upstream G2P asserts on some
+    of those characters; URLs carry no useful spoken content, so remove them
+    and turn other unsupported glyphs into natural pauses.
+    """
+    value = unicodedata.normalize("NFKC", text)
+    value = URL_PATTERN.sub("，", value)
+    value = value.translate(str.maketrans({
+        "：": ",", "；": ",", "，": ",", "。": ".", "！": "!", "？": "?",
+        "、": ",", "·": ",", "—": "-", "–": "-", "…": "…", "\n": ".",
+    }))
+    value = UNSUPPORTED_TEXT_PATTERN.sub("，", value)
+    value = re.sub(r"\s+", " ", value).strip(" ,.-")
+    if not value:
+        raise ValueError("没有可供朗读的文本内容。")
+    return value
+
+
 def synthesize(request: SynthesisRequest) -> bytes:
     if melo_tts is None:
         raise RuntimeError("MeloTTS model has not loaded")
     speaker_ids = melo_tts.hps.data.spk2id
     if request.voice_id not in speaker_ids:
         raise KeyError(request.voice_id)
+    text = normalize_synthesis_text(request.text)
     with inference_lock:
         audio = melo_tts.tts_to_file(
-            request.text,
+            text,
             speaker_ids[request.voice_id],
             output_path=None,
             speed=request.speed,
@@ -134,6 +160,8 @@ def synthesize_wav(request: SynthesisRequest) -> Response:
         raise HTTPException(status_code=422, detail="Unknown MeloTTS voice_id") from None
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+    except (AssertionError, IndexError, ValueError):
+        raise HTTPException(status_code=422, detail="这段文本包含暂不支持的字符，请切换浏览器语音或调整正文后重试。") from None
     return Response(
         content=audio,
         media_type="audio/wav",
