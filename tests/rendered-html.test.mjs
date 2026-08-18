@@ -46,13 +46,13 @@ test("URL imports use the persistent document API and dynamic reader data", asyn
   assert.match(documents, /document_chunks/);
 });
 
-test("reader exposes H5 download, private CosyVoice and a revocable share link", async () => {
-  const [page, shareWorker, sharePage, ttsWorker, cosyVoice] = await Promise.all([
+test("reader exposes H5 download, private MeloTTS and a revocable share link", async () => {
+  const [page, shareWorker, sharePage, ttsWorker, meloTts] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("worker/share.ts", root), "utf8"),
     readFile(new URL("app/share/[shareId]/shared-reader.tsx", root), "utf8"),
     readFile(new URL("worker/tts.ts", root), "utf8"),
-    readFile(new URL("services/cosyvoice/server.py", root), "utf8"),
+    readFile(new URL("services/melotts/server.py", root), "utf8"),
   ]);
   assert.match(page, /一键下载 H5/);
   assert.match(page, /生成分享链接/);
@@ -67,12 +67,12 @@ test("reader exposes H5 download, private CosyVoice and a revocable share link",
   assert.match(page, /speakFromOffset/);
   assert.match(sharePage, /const changeVoice/);
   assert.match(page, /privateTtsVoices/);
-  assert.match(page, /CosyVoice/);
+  assert.match(page, /MeloTTS/);
   assert.match(ttsWorker, /CUSTOMER_HTTP_TTS/);
   assert.match(ttsWorker, /\/v1\/synthesize/);
-  assert.match(cosyVoice, /inference_sft/);
-  assert.match(cosyVoice, /list_available_spks/);
-  assert.match(cosyVoice, /use_project_wetext_cache/);
+  assert.match(meloTts, /tts_to_file/);
+  assert.match(meloTts, /spk2id/);
+  assert.match(meloTts, /MeloTTS-Chinese/);
 });
 
 test("backend includes durable document parsing and private knowledge boundaries", async () => {

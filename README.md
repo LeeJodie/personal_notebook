@@ -24,7 +24,7 @@ uv pip install --python .venv-document-processor/bin/python -r services/document
 npm run dev:processor
 ```
 
-私有 CosyVoice TTS（内置多音色）首次准备并启动：
+私有 MeloTTS（CPU 低延迟）首次准备并启动：
 
 ```bash
 npm run setup:tts-model
@@ -47,6 +47,6 @@ npm test
 - 身份与隔离：主工作台必须注册/登录后才能使用；部署后的访问使用平台提供的 ChatGPT 身份，每个请求都在服务端注入 `tenant_id` 与 `user_id` 条件。本机提供注册、登录和退出的体验账号，密码使用 PBKDF2 派生后保存、会话使用 HttpOnly cookie，便于验证多用户数据隔离；该机制只用于 localhost，不能用于生产认证。用户显式生成的分享链接保持只读公开访问，以支持转发。
 - 分享：资料所有者可生成带有效期与 H5 下载权限的链接，并可立即撤销。链接 token 只存哈希，不会写入数据库明文。
 - 检索：默认使用用户隔离的 D1 关键词分块检索；部署 [`services/knowledge_index`](services/knowledge_index) 并配置私有绑定后，自动切换到 FastEmbed + Qdrant 语义召回。
-- 私有 TTS：[`services/cosyvoice`](services/cosyvoice) 已接入官方 CosyVoice 源码与 `CosyVoice-300M-SFT` 多说话人模型。模型服务运行时，阅读器的音色选择自动使用 CosyVoice；服务未启动时保持浏览器 TTS 兜底。生产环境通过 `CUSTOMER_HTTP_TTS` 私有绑定接入，浏览器不会直接访问模型服务。
+- 私有 TTS：[`services/melotts`](services/melotts) 已接入官方 MeloTTS 中文模型。模型服务运行时，音色选择提供 MeloTTS 私有音色；服务未启动时保持浏览器 TTS 兜底。生产环境通过 `CUSTOMER_HTTP_TTS` 私有绑定接入，浏览器不会直接访问模型服务。
 
 完整的生产数据与权限设计见 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md)，前后端联调以 [`public/openapi.yaml`](public/openapi.yaml) 为准。

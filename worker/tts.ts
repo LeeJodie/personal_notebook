@@ -21,14 +21,14 @@ async function callTts(env: TtsEnv, pathname: string, init: RequestInit): Promis
   if (env.CUSTOMER_HTTP_TTS) return env.CUSTOMER_HTTP_TTS.fetch(`http://tts.internal${pathname}`, init);
   const localUrl = localTtsUrl(env);
   if (localUrl) return fetch(`${localUrl}${pathname}`, init);
-  throw new Error("私有 TTS 服务尚未配置。请启动 CosyVoice，或在部署环境配置 CUSTOMER_HTTP_TTS 私有绑定。");
+  throw new Error("私有 TTS 服务尚未配置。请启动 MeloTTS，或在部署环境配置 CUSTOMER_HTTP_TTS 私有绑定。");
 }
 
 function passAudio(response: Response): Response {
   const headers = new Headers({
     "cache-control": "no-store",
     "content-type": response.headers.get("content-type") || "audio/wav",
-    "x-tts-provider": response.headers.get("x-tts-provider") || "CosyVoice",
+    "x-tts-provider": response.headers.get("x-tts-provider") || "MeloTTS",
   });
   const model = response.headers.get("x-tts-model");
   if (model) headers.set("x-tts-model", model);
@@ -37,7 +37,7 @@ function passAudio(response: Response): Response {
 
 async function upstreamProblem(response: Response): Promise<Response> {
   const body = await response.json<{ detail?: string; message?: string }>().catch(() => ({}));
-  return problem(body.detail || body.message || "CosyVoice 合成失败。", response.status >= 500 ? 503 : response.status, "TTS_UPSTREAM_ERROR");
+  return problem(body.detail || body.message || "MeloTTS 合成失败。", response.status >= 500 ? 503 : response.status, "TTS_UPSTREAM_ERROR");
 }
 
 export async function handleTtsRequest(request: Request, env: TtsEnv): Promise<Response> {
@@ -55,8 +55,8 @@ export async function handleTtsRequest(request: Request, env: TtsEnv): Promise<R
       const response = await callTts(env, "/v1/voices", { headers });
       if (!response.ok) return upstreamProblem(response);
       const data = await response.json<{ provider?: string; model?: string; items?: unknown[] }>();
-      if (!Array.isArray(data.items)) return problem("CosyVoice 未返回可用音色。", 503, "TTS_INVALID_RESPONSE");
-      return json({ provider: data.provider || "cosyvoice", model: data.model || null, items: data.items });
+      if (!Array.isArray(data.items)) return problem("MeloTTS 未返回可用音色。", 503, "TTS_INVALID_RESPONSE");
+      return json({ provider: data.provider || "melotts", model: data.model || null, items: data.items });
     } catch (error) {
       return problem(error instanceof Error ? error.message : "私有 TTS 服务不可用。", 503, "TTS_UNAVAILABLE");
     }

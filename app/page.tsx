@@ -64,10 +64,9 @@ interface PrivateTtsVoice {
 }
 
 const supportedExtensions = ["DOCX", "MD", "TXT", "XLSX", "PDF"];
-// The local 300M CosyVoice model is intentionally fed short segments.
-// It reduces the first wait on a CPU-only development machine; production
-// GPU deployments can raise this without changing the public TTS API contract.
-const COSYVOICE_SEGMENT_CHARS = 12;
+// MeloTTS supports CPU real-time synthesis. A paragraph-sized segment keeps
+// delivery efficient while retaining the bounded public TTS API contract.
+const MELOTTS_SEGMENT_CHARS = 360;
 const TTS_VOICE_VALUE_SEPARATOR = "\u001f";
 
 const demoDocument: ReaderDocument = {
@@ -143,7 +142,7 @@ export default function Home() {
   const [voiceName, setVoiceName] = useState("");
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [privateTtsVoices, setPrivateTtsVoices] = useState<PrivateTtsVoice[]>([]);
-  const [ttsProvider, setTtsProvider] = useState<"browser" | "cosyvoice">("browser");
+  const [ttsProvider, setTtsProvider] = useState<"browser" | "melotts">("browser");
   const [speaking, setSpeaking] = useState(false);
   const [ttsPlaybackState, setTtsPlaybackState] = useState<TtsPlaybackState>("idle");
   const [speechProgress, setSpeechProgress] = useState(0);
@@ -191,7 +190,7 @@ export default function Home() {
     () => [readerDocument.title, readerDocument.description, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])].join("。"),
     [readerDocument],
   );
-  const isCosySynthesizing = speaking && ttsProvider === "cosyvoice" && ttsPlaybackState === "synthesizing";
+  const isMeloSynthesizing = speaking && ttsProvider === "melotts" && ttsPlaybackState === "synthesizing";
 
   useEffect(() => {
     if (!("speechSynthesis" in window)) return;
@@ -486,8 +485,8 @@ export default function Home() {
     }
     const context = audioContextRef.current || new AudioContext();
     audioContextRef.current = context;
-    // Resume within the click handler. The actual CosyVoice response may take
-    // longer than a browser's transient user-activation window on local CPU.
+    // Resume within the click handler so the finished private audio can play
+    // without losing the browser's user-activation permission.
     if (context.state === "suspended") void context.resume().catch(() => setNotice("浏览器未允许音频播放，请再次点击朗读。"));
     return context;
   };
@@ -545,8 +544,8 @@ export default function Home() {
     setTtsPlaybackState("playing");
   };
 
-  const playCosySegment = async (offset: number, selectedVoice: string, session: number, audioContext: AudioContext) => {
-    const segment = articleText.slice(offset, offset + COSYVOICE_SEGMENT_CHARS);
+  const playMeloSegment = async (offset: number, selectedVoice: string, session: number, audioContext: AudioContext) => {
+    const segment = articleText.slice(offset, offset + MELOTTS_SEGMENT_CHARS);
     if (!segment || speechSessionRef.current !== session) return;
     const controller = new AbortController();
     ttsAbortRef.current = controller;
@@ -560,7 +559,7 @@ export default function Home() {
       });
       if (!response.ok) {
         const result = await response.json().catch(() => ({})) as { message?: string };
-        throw new Error(result.message || "CosyVoice 合成失败。");
+        throw new Error(result.message || "MeloTTS 合成失败。");
       }
       const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
       if (speechSessionRef.current !== session) {
@@ -593,7 +592,7 @@ export default function Home() {
           setTtsPlaybackState("idle");
           return;
         }
-        void playCosySegment(nextOffset, selectedVoice, session, audioContext);
+        void playMeloSegment(nextOffset, selectedVoice, session, audioContext);
       };
       source.start();
       setTtsPlaybackState("playing");
@@ -602,15 +601,15 @@ export default function Home() {
       if (controller.signal.aborted || speechSessionRef.current !== session) return;
       setSpeaking(false);
       setTtsPlaybackState("idle");
-      setNotice(error instanceof Error ? error.message : "CosyVoice 服务暂不可用。");
+      setNotice(error instanceof Error ? error.message : "MeloTTS 服务暂不可用。");
     } finally {
       if (ttsAbortRef.current === controller) ttsAbortRef.current = null;
     }
   };
 
-  const speakWithCosyVoice = (requestedOffset: number, selectedVoice = voiceName) => {
+  const speakWithMeloTts = (requestedOffset: number, selectedVoice = voiceName) => {
     if (!articleText || !selectedVoice) {
-      setNotice("CosyVoice 音色尚未就绪，请稍后再试。");
+      setNotice("MeloTTS 音色尚未就绪，请稍后再试。");
       return;
     }
     const audioContext = preparePrivateAudio();
@@ -625,7 +624,7 @@ export default function Home() {
     setSpeechProgress(Math.round((offset / articleText.length) * 100));
     setSpeaking(true);
     setTtsPlaybackState("synthesizing");
-    void playCosySegment(offset, selectedVoice, session, audioContext);
+    void playMeloSegment(offset, selectedVoice, session, audioContext);
   };
 
   const playSpeech = () => {
@@ -633,8 +632,8 @@ export default function Home() {
       stopSpeech(false);
       return;
     }
-    if (ttsProvider === "cosyvoice" && privateTtsVoices.length) {
-      speakWithCosyVoice(speechProgress >= 100 ? 0 : speechOffsetRef.current);
+    if (ttsProvider === "melotts" && privateTtsVoices.length) {
+      speakWithMeloTts(speechProgress >= 100 ? 0 : speechOffsetRef.current);
       return;
     }
     speakFromOffset(speechProgress >= 100 ? 0 : speechOffsetRef.current);
@@ -644,8 +643,8 @@ export default function Home() {
     setTtsProvider(nextProvider);
     setVoiceName(nextVoice);
     if (!speaking) return;
-    if (nextProvider === "cosyvoice" && privateTtsVoices.length) {
-      speakWithCosyVoice(speechOffsetRef.current, nextVoice);
+    if (nextProvider === "melotts" && privateTtsVoices.length) {
+      speakWithMeloTts(speechOffsetRef.current, nextVoice);
       return;
     }
     speakFromOffset(speechOffsetRef.current, nextVoice);
@@ -656,7 +655,7 @@ export default function Home() {
     if (separatorIndex < 0) return;
     const provider = value.slice(0, separatorIndex);
     const voice = value.slice(separatorIndex + TTS_VOICE_VALUE_SEPARATOR.length);
-    if ((provider !== "browser" && provider !== "cosyvoice") || !voice) return;
+    if ((provider !== "browser" && provider !== "melotts") || !voice) return;
     changeVoice(voice, provider);
   };
 
@@ -935,9 +934,9 @@ export default function Home() {
         </section>}
       </div>
       <div className="tts-player">
-        <button className="play-button" onClick={playSpeech} aria-label={speaking ? (isCosySynthesizing ? "取消生成" : "暂停播放") : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
-        <div className="track-info"><div><strong>{isCosySynthesizing ? "正在生成音频 · " : speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "cosyvoice" ? "CosyVoice" : "浏览器语音"}</strong><span>{isCosySynthesizing ? "本机正在合成短语音片段，点击暂停可取消" : readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className={`audio-progress${isCosySynthesizing ? " is-synthesizing" : ""}`}><span style={{ width: `${speechProgress}%` }} /></div></div>
-        <div className="voice-select"><label htmlFor="voice">音色 {ttsProvider === "cosyvoice" ? "· 私有模型" : "· 即时语音"}</label><select id="voice" value={`${ttsProvider}${TTS_VOICE_VALUE_SEPARATOR}${voiceName}`} onChange={(event) => selectVoice(event.target.value)}>{voices.length ? <optgroup label="浏览器即时语音">{voices.slice(0, 12).map((voice) => <option key={`browser-${voice.name}-${voice.lang}`} value={`browser${TTS_VOICE_VALUE_SEPARATOR}${voice.name}`}>{voice.name} · {voice.lang}</option>)}</optgroup> : <option value={`browser${TTS_VOICE_VALUE_SEPARATOR}system-default`}>系统默认音色</option>}{privateTtsVoices.length ? <optgroup label="CosyVoice 私有模型（CPU 本机较慢）">{privateTtsVoices.map((voice) => <option key={`cosyvoice-${voice.id}`} value={`cosyvoice${TTS_VOICE_VALUE_SEPARATOR}${voice.id}`}>{voice.label} · {voice.language}</option>)}</optgroup> : null}</select></div>
+        <button className="play-button" onClick={playSpeech} aria-label={speaking ? (isMeloSynthesizing ? "取消生成" : "暂停播放") : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
+        <div className="track-info"><div><strong>{isMeloSynthesizing ? "正在生成音频 · " : speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "melotts" ? "MeloTTS" : "浏览器语音"}</strong><span>{isMeloSynthesizing ? "MeloTTS 正在合成音频，点击暂停可取消" : readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className={`audio-progress${isMeloSynthesizing ? " is-synthesizing" : ""}`}><span style={{ width: `${speechProgress}%` }} /></div></div>
+        <div className="voice-select"><label htmlFor="voice">音色 {ttsProvider === "melotts" ? "· 私有模型" : "· 即时语音"}</label><select id="voice" value={`${ttsProvider}${TTS_VOICE_VALUE_SEPARATOR}${voiceName}`} onChange={(event) => selectVoice(event.target.value)}>{voices.length ? <optgroup label="浏览器即时语音">{voices.slice(0, 12).map((voice) => <option key={`browser-${voice.name}-${voice.lang}`} value={`browser${TTS_VOICE_VALUE_SEPARATOR}${voice.name}`}>{voice.name} · {voice.lang}</option>)}</optgroup> : <option value={`browser${TTS_VOICE_VALUE_SEPARATOR}system-default`}>系统默认音色</option>}{privateTtsVoices.length ? <optgroup label="MeloTTS 私有模型">{privateTtsVoices.map((voice) => <option key={`melotts-${voice.id}`} value={`melotts${TTS_VOICE_VALUE_SEPARATOR}${voice.id}`}>{voice.label} · {voice.language}</option>)}</optgroup> : null}</select></div>
         <span className="speed-pill">1.0×</span>
       </div>
       {notice && <button className="toast" onClick={() => setNotice("")} aria-label="关闭提示">{notice}<span>×</span></button>}
@@ -992,7 +991,7 @@ export default function Home() {
           ["GET", "/v1/documents/{document_id}/reader", "获取结构化阅读模型"],
           ["POST", "/v1/documents/{document_id}/shares", "生成可撤销的阅读分享链接"],
           ["GET", "/v1/public/shares/{share_token}", "匿名打开已授权的分享阅读页"],
-          ["POST", "/v1/tts/synthesize", "使用私有 CosyVoice 合成音频"],
+          ["POST", "/v1/tts/synthesize", "使用私有 MeloTTS 合成音频"],
           ["POST", "/v1/knowledge/search", "在当前用户知识库检索"],
         ].map(([method, path, desc]) => <div className="endpoint" key={path}><span className={`method ${method.toLowerCase()}`}>{method}</span><code>{path}</code><p>{desc}</p><button aria-label={`查看 ${path}`}>↗</button></div>)}
       </div>

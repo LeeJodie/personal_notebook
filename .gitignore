@@ -47,3 +47,11 @@ yarn-error.log*
 /services/cosyvoice/modelscope-cache/
 /services/cosyvoice/huggingface-cache/
 /services/cosyvoice/__pycache__/
+
+# Locally deployed MeloTTS source, Python runtime and downloaded model assets.
+# The tracked wrapper under services/melotts keeps this deployment reproducible.
+/services/melotts/MeloTTS/
+/services/melotts/.venv/
+/services/melotts/huggingface-cache/
+/services/melotts/cache/
+/services/melotts/__pycache__/
