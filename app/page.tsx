@@ -905,6 +905,66 @@ export default function Home() {
     }
   };
 
+  const pasteUrlFromClipboard = async () => {
+    setSourceType("url");
+    try {
+      const value = await navigator.clipboard.readText();
+      setUrl(value);
+      setUrlError("");
+    } catch {
+      setNotice("请在网页链接输入框中手动粘贴链接。");
+    }
+  };
+
+  const renderMobileCreate = () => {
+    const mobileVoices: Array<{ provider: "browser" | "melotts"; value: string; title: string; detail: string }> = [
+      ...privateTtsVoices.slice(0, 1).map((voice) => ({ provider: "melotts" as const, value: voice.id, title: voice.label, detail: "私有模型 · 标准" })),
+      ...voices.slice(0, 2).map((voice, index) => ({ provider: "browser" as const, value: voice.name, title: index === 0 ? "即时女声" : "即时男声", detail: "系统语音 · 即时" })),
+    ];
+    const materialItems = storedDocuments.length
+      ? storedDocuments.slice(0, 3).map((item) => ({ id: item.id, type: item.source_type === "url" ? "网页" : item.filename?.split(".").pop()?.toUpperCase() || "文件", title: item.title, meta: item.status === "ready" ? `已完成 · 约 ${Math.max(1, Math.ceil(item.word_count / 350))} 分钟` : `处理中 · ${item.progress}%`, stored: item }))
+      : [
+        { id: "sample-web", type: "网页", title: "为什么伟大不能被计划", meta: "体验示例 · 28 分钟" },
+        { id: "sample-doc", type: "DOC", title: "Q2 团队复盘纪要", meta: "体验示例 · 15 分钟" },
+        { id: "sample-pdf", type: "PDF", title: "消费电子趋势报告", meta: "体验示例 · 46 分钟" },
+      ];
+    const sourceReady = sourceType === "file" ? Boolean(selectedFile) : Boolean(url.trim());
+    const estimatedWords = selectedFile ? Math.max(1_000, Math.round(selectedFile.size / 7)) : readerDocument.wordCount;
+
+    return <main className="mobile-station-page">
+      <section className="mobile-station-hero">
+        <div className="mobile-station-brand"><span className="station-mark">听</span><div><h1>听读电台</h1><p>上传即听 · 私有存储</p></div></div>
+        <button className="credit-pill" onClick={openLibrary} aria-label="查看我的资料">⚡ <strong>本地体验</strong></button>
+      </section>
+
+      <section className="mobile-import-card" aria-label="上传文档或网页">
+        <input className="mobile-file-input" id="mobile-file-input" type="file" accept=".docx,.md,.txt,.xlsx,.pdf" onChange={(event) => acceptFile(event.target.files?.[0])} />
+        {sourceType === "file" ? <div className={`mobile-drop-zone ${selectedFile ? "is-ready" : ""} ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
+          {selectedFile ? <><span className="mobile-file-icon">{selectedFile.name.split(".").pop()?.toUpperCase()}</span><strong>{selectedFile.name}</strong><small>{(selectedFile.size / 1024 / 1024).toFixed(1)} MB · 已选择</small><label className="mobile-file-trigger" htmlFor="mobile-file-input">更换文件</label></> : <><span className="mobile-upload-icon">⇧</span><strong>上传文档 / 粘贴网页</strong><small>拖入 .docx · .pdf，或选择下方入口</small><label className="mobile-file-trigger" htmlFor="mobile-file-input">选择文件</label></>}
+        </div> : <div className="mobile-url-zone"><span className="mobile-upload-icon">↗</span><strong>粘贴网页链接</strong><input value={url} onChange={(event) => { setUrl(event.target.value); setUrlError(""); }} onKeyDown={(event) => event.key === "Enter" && void submitUrl()} placeholder="https://example.com/article" /><small>{urlError || "服务端将提取真实正文"}</small></div>}
+        <div className="mobile-source-switch" role="tablist">
+          <button className={sourceType === "file" ? "active" : ""} onClick={() => setSourceType("file")} role="tab" aria-selected={sourceType === "file"}>▤ 文件</button>
+          <button className={sourceType === "url" ? "active" : ""} onClick={() => setSourceType("url")} role="tab" aria-selected={sourceType === "url"}>⌁ 网页</button>
+          <button onClick={() => void pasteUrlFromClipboard()}>▣ 剪贴板</button>
+        </div>
+      </section>
+
+      <section className="mobile-confirm-card">
+        <p className="mobile-status">{sourceReady ? "解析准备 · 待确认" : "等待资料 · 待导入"}</p>
+        <div className="mobile-confirm-title"><span className="mobile-wave">▮▯▮</span><h2>{selectedFile ? selectedFile.name.replace(/\.[^.]+$/, "") : sourceType === "url" && url ? "网页内容准备就绪" : "选择资料，开始听读"}</h2></div>
+        <p className="mobile-confirm-copy">预计正文约 {estimatedWords.toLocaleString()} 字 · 完成后可阅读、收听、下载与分享</p>
+        <div className="mobile-voice-grid" aria-label="选择音色">
+          {mobileVoices.length ? mobileVoices.map((voice) => <button key={`${voice.provider}-${voice.value}`} className={ttsProvider === voice.provider && voiceName === voice.value ? "selected" : ""} onClick={() => changeVoice(voice.value, voice.provider)}><strong>{voice.title}</strong><small>{voice.detail}</small></button>) : <button className="selected" onClick={() => setTtsProvider("browser")}><strong>系统语音</strong><small>正在加载可用音色</small></button>}
+        </div>
+        <div className="mobile-estimate"><div><span>预计用时</span><strong>约 {Math.max(2, Math.ceil(estimatedWords / 350))} 分钟</strong></div><small>✓ 失败自动取消，不产生额外资料</small></div>
+        <button className="mobile-confirm-button" onClick={() => { if (sourceType === "file") { if (selectedFile) void startProcessing(); else document.getElementById("mobile-file-input")?.click(); } else if (url.trim()) void submitUrl(); }} disabled={isUploading || isCrawling}>{isUploading || isCrawling ? "正在处理…" : sourceReady ? "确认并开始转换" : "选择资料后开始"}</button>
+      </section>
+
+      <section className="mobile-materials"><div className="mobile-section-heading"><h2>我的资料</h2><button onClick={openLibrary}>全部 →</button></div><div className="mobile-material-list">{materialItems.map((item) => <button key={item.id} className="mobile-material-item" onClick={() => "stored" in item && item.stored ? void openStoredDocument(item.stored) : (() => { setReaderDocument(demoDocument); setView("reader"); })()}><span className={`mobile-type ${item.type.toLowerCase()}`}>{item.type}</span><span><strong>{item.title}</strong><small>{item.meta}</small></span><i>▶</i></button>)}</div></section>
+      {notice && <div className="mobile-notice" role="status">{notice}</div>}
+    </main>;
+  };
+
   const renderCreate = () => (
     <main className="create-page">
       <section className="hero-copy">
@@ -1128,6 +1188,11 @@ export default function Home() {
     </div>;
   }
 
+  // This is a render helper. Its callbacks access refs only after a user
+  // gesture (file selection / conversion), never while this view is rendered.
+  // eslint-disable-next-line react-hooks/refs
+  const mobileCreateView = renderMobileCreate();
+
   return (
     <div className={`app-shell view-${view}`}>
       <header className="app-header">
@@ -1140,7 +1205,7 @@ export default function Home() {
         </nav>
         <div className="header-actions"><button className="demo-link" onClick={() => { if (!requireLogin()) return; setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button><div className="account-summary"><span className="avatar" aria-hidden="true">{currentUser.display_name.slice(0, 2).toUpperCase()}<i /></span><span className="account-name" title={currentUser.email || currentUser.display_name}>{currentUser.display_name}</span><button className="logout-button" onClick={() => void signOut()}>退出登录</button></div></div>
       </header>
-      {view === "create" && renderCreate()}
+      {view === "create" && <><div className="desktop-create-view">{renderCreate()}</div>{mobileCreateView}</>}
       {view === "processing" && renderProcessing()}
       {view === "reader" && renderReader()}
       {view === "library" && renderLibrary()}
