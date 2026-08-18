@@ -63,10 +63,18 @@ interface PrivateTtsVoice {
   language: string;
 }
 
+interface MeloAudioSegment {
+  offset: number;
+  text: string;
+  audioBuffer: AudioBuffer;
+}
+
 const supportedExtensions = ["DOCX", "MD", "TXT", "XLSX", "PDF"];
-// MeloTTS supports CPU real-time synthesis. A paragraph-sized segment keeps
-// delivery efficient while retaining the bounded public TTS API contract.
-const MELOTTS_SEGMENT_CHARS = 360;
+// Start with a short segment, then generate medium segments while the current
+// one is playing. CPU TTS returns a complete WAV rather than a stream, so this
+// keeps the first-play delay low and prevents gaps between paragraphs.
+const MELOTTS_INITIAL_SEGMENT_CHARS = 86;
+const MELOTTS_SEGMENT_CHARS = 150;
 const TTS_VOICE_VALUE_SEPARATOR = "\u001f";
 
 const demoDocument: ReaderDocument = {
@@ -181,7 +189,8 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const privateProgressFrameRef = useRef<number | null>(null);
-  const ttsAbortRef = useRef<AbortController | null>(null);
+  const meloRequestControllersRef = useRef(new Set<AbortController>());
+  const meloPrefetchRef = useRef<{ session: number; offset: number; promise: Promise<MeloAudioSegment | null> } | null>(null);
   const speechOffsetRef = useRef(0);
   const speechSessionRef = useRef(0);
   const crawlAbortRef = useRef<AbortController | null>(null);
@@ -191,6 +200,12 @@ export default function Home() {
     [readerDocument],
   );
   const isMeloSynthesizing = speaking && ttsProvider === "melotts" && ttsPlaybackState === "synthesizing";
+
+  const cancelMeloRequests = () => {
+    for (const controller of meloRequestControllersRef.current) controller.abort();
+    meloRequestControllersRef.current.clear();
+    meloPrefetchRef.current = null;
+  };
 
   useEffect(() => {
     if (!("speechSynthesis" in window)) return;
@@ -217,7 +232,7 @@ export default function Home() {
 
   useEffect(() => () => {
     window.speechSynthesis?.cancel();
-    ttsAbortRef.current?.abort();
+    cancelMeloRequests();
     audioSourceRef.current?.stop();
     audioContextRef.current?.close();
   }, []);
@@ -493,8 +508,7 @@ export default function Home() {
 
   const stopSpeech = (resetProgress = false) => {
     speechSessionRef.current += 1;
-    ttsAbortRef.current?.abort();
-    ttsAbortRef.current = null;
+    cancelMeloRequests();
     clearPrivateAudio();
     window.speechSynthesis?.cancel();
     utteranceRef.current = null;
@@ -544,17 +558,16 @@ export default function Home() {
     setTtsPlaybackState("playing");
   };
 
-  const playMeloSegment = async (offset: number, selectedVoice: string, session: number, audioContext: AudioContext) => {
-    const segment = articleText.slice(offset, offset + MELOTTS_SEGMENT_CHARS);
-    if (!segment || speechSessionRef.current !== session) return;
+  const fetchMeloSegment = async (offset: number, maxChars: number, selectedVoice: string, session: number, audioContext: AudioContext): Promise<MeloAudioSegment | null> => {
+    const text = articleText.slice(offset, offset + maxChars);
+    if (!text || speechSessionRef.current !== session) return null;
     const controller = new AbortController();
-    ttsAbortRef.current = controller;
-    setTtsPlaybackState("synthesizing");
+    meloRequestControllersRef.current.add(controller);
     try {
       const response = await fetch("/v1/tts/synthesize", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: segment, voice_id: selectedVoice, speed: 1 }),
+        body: JSON.stringify({ text, voice_id: selectedVoice, speed: 1 }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -562,48 +575,83 @@ export default function Home() {
         throw new Error(result.message || "MeloTTS 合成失败。");
       }
       const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
-      if (speechSessionRef.current !== session) {
-        return;
+      return speechSessionRef.current === session ? { offset, text, audioBuffer } : null;
+    } finally {
+      meloRequestControllersRef.current.delete(controller);
+    }
+  };
+
+  const prefetchMeloSegment = (offset: number, selectedVoice: string, session: number, audioContext: AudioContext) => {
+    if (offset >= articleText.length || speechSessionRef.current !== session) return;
+    const existing = meloPrefetchRef.current;
+    if (existing?.session === session && existing.offset === offset) return;
+    const promise = fetchMeloSegment(offset, MELOTTS_SEGMENT_CHARS, selectedVoice, session, audioContext);
+    // The promise is deliberately awaited at the segment boundary. Attach a
+    // handler now so an aborted background request never becomes unhandled.
+    void promise.catch(() => undefined);
+    meloPrefetchRef.current = { session, offset, promise };
+  };
+
+  const playMeloSegment = async (offset: number, selectedVoice: string, session: number, audioContext: AudioContext, prepared?: MeloAudioSegment | null) => {
+    let nextSegment = prepared;
+    try {
+      if (!nextSegment) {
+        setTtsPlaybackState("synthesizing");
+        nextSegment = await fetchMeloSegment(
+          offset,
+          offset === 0 ? MELOTTS_INITIAL_SEGMENT_CHARS : MELOTTS_SEGMENT_CHARS,
+          selectedVoice,
+          session,
+          audioContext,
+        );
       }
+      if (!nextSegment || speechSessionRef.current !== session) return;
       clearPrivateAudio();
       const source = audioContext.createBufferSource();
-      source.buffer = audioBuffer;
+      source.buffer = nextSegment.audioBuffer;
       source.connect(audioContext.destination);
       audioSourceRef.current = source;
       const startedAt = audioContext.currentTime;
+      const followingOffset = offset + nextSegment.text.length;
+      // Start the next CPU synthesis as soon as audio begins. It will normally
+      // finish while the listener is hearing the current segment.
+      prefetchMeloSegment(followingOffset, selectedVoice, session, audioContext);
       const updateProgress = () => {
-        if (speechSessionRef.current !== session || audioSourceRef.current !== source || audioBuffer.duration <= 0) return;
-        const elapsed = Math.min(audioBuffer.duration, Math.max(0, audioContext.currentTime - startedAt));
-        const absoluteOffset = Math.min(articleText.length, offset + Math.round(segment.length * (elapsed / audioBuffer.duration)));
+        if (speechSessionRef.current !== session || audioSourceRef.current !== source || nextSegment.audioBuffer.duration <= 0) return;
+        const elapsed = Math.min(nextSegment.audioBuffer.duration, Math.max(0, audioContext.currentTime - startedAt));
+        const absoluteOffset = Math.min(articleText.length, offset + Math.round(nextSegment.text.length * (elapsed / nextSegment.audioBuffer.duration)));
         speechOffsetRef.current = absoluteOffset;
         setSpeechProgress(Math.min(100, Math.round((absoluteOffset / articleText.length) * 100)));
-        if (elapsed < audioBuffer.duration) privateProgressFrameRef.current = window.requestAnimationFrame(updateProgress);
+        if (elapsed < nextSegment.audioBuffer.duration) privateProgressFrameRef.current = window.requestAnimationFrame(updateProgress);
       };
       source.onended = () => {
         if (speechSessionRef.current !== session) return;
         if (privateProgressFrameRef.current !== null) window.cancelAnimationFrame(privateProgressFrameRef.current);
         privateProgressFrameRef.current = null;
         if (audioSourceRef.current === source) audioSourceRef.current = null;
-        const nextOffset = offset + segment.length;
-        speechOffsetRef.current = Math.min(articleText.length, nextOffset);
+        speechOffsetRef.current = Math.min(articleText.length, followingOffset);
         setSpeechProgress(Math.min(100, Math.round((speechOffsetRef.current / articleText.length) * 100)));
-        if (nextOffset >= articleText.length) {
+        if (followingOffset >= articleText.length) {
           setSpeaking(false);
           setTtsPlaybackState("idle");
           return;
         }
-        void playMeloSegment(nextOffset, selectedVoice, session, audioContext);
+        const prefetched = meloPrefetchRef.current;
+        meloPrefetchRef.current = null;
+        if (prefetched?.session === session && prefetched.offset === followingOffset) {
+          void prefetched.promise.then((audio) => playMeloSegment(followingOffset, selectedVoice, session, audioContext, audio)).catch(() => playMeloSegment(followingOffset, selectedVoice, session, audioContext));
+          return;
+        }
+        void playMeloSegment(followingOffset, selectedVoice, session, audioContext);
       };
       source.start();
       setTtsPlaybackState("playing");
       updateProgress();
     } catch (error) {
-      if (controller.signal.aborted || speechSessionRef.current !== session) return;
+      if (speechSessionRef.current !== session) return;
       setSpeaking(false);
       setTtsPlaybackState("idle");
       setNotice(error instanceof Error ? error.message : "MeloTTS 服务暂不可用。");
-    } finally {
-      if (ttsAbortRef.current === controller) ttsAbortRef.current = null;
     }
   };
 
@@ -617,7 +665,7 @@ export default function Home() {
     const offset = requestedOffset >= articleText.length ? 0 : Math.max(0, requestedOffset);
     const session = speechSessionRef.current + 1;
     speechSessionRef.current = session;
-    ttsAbortRef.current?.abort();
+    cancelMeloRequests();
     clearPrivateAudio();
     window.speechSynthesis?.cancel();
     speechOffsetRef.current = offset;
