@@ -70,12 +70,47 @@ interface MeloAudioSegment {
 }
 
 const supportedExtensions = ["DOCX", "MD", "TXT", "XLSX", "PDF"];
-// Start with a short segment, then generate medium segments while the current
-// one is playing. CPU TTS returns a complete WAV rather than a stream, so this
-// keeps the first-play delay low and prevents gaps between paragraphs.
-const MELOTTS_INITIAL_SEGMENT_CHARS = 86;
-const MELOTTS_SEGMENT_CHARS = 150;
+// CPU TTS returns a complete WAV rather than a stream. Start with the first
+// complete short sentence, then prefetch semantically bounded medium segments.
+const MELOTTS_INITIAL_TARGET_CHARS = 42;
+const MELOTTS_INITIAL_MAX_CHARS = 86;
+const MELOTTS_SEGMENT_TARGET_CHARS = 110;
+const MELOTTS_SEGMENT_MAX_CHARS = 180;
 const TTS_VOICE_VALUE_SEPARATOR = "\u001f";
+
+function findBoundary(text: string, from: number, to: number, punctuation: string, reverse = false): number | null {
+  if (reverse) {
+    for (let index = to - 1; index >= from; index -= 1) if (punctuation.includes(text[index])) return index + 1;
+    return null;
+  }
+  for (let index = from; index < to; index += 1) if (punctuation.includes(text[index])) return index + 1;
+  return null;
+}
+
+function nextMeloTextSegment(text: string, offset: number, preferFastStart: boolean): { offset: number; text: string } | null {
+  if (offset >= text.length) return null;
+  const target = preferFastStart ? MELOTTS_INITIAL_TARGET_CHARS : MELOTTS_SEGMENT_TARGET_CHARS;
+  const max = preferFastStart ? MELOTTS_INITIAL_MAX_CHARS : MELOTTS_SEGMENT_MAX_CHARS;
+  const maxEnd = Math.min(text.length, offset + max);
+  const minEnd = Math.min(maxEnd, offset + 12);
+  const targetEnd = Math.min(maxEnd, offset + target);
+  const sentenceEnd = "。！？!?；;.";
+  const clauseEnd = "，,、：:\n";
+  let end: number | null = null;
+
+  if (preferFastStart) {
+    // The first complete phrase beats a larger batch: it minimizes the time
+    // before the listener hears the private voice.
+    end = findBoundary(text, minEnd, maxEnd, sentenceEnd) || findBoundary(text, minEnd, maxEnd, clauseEnd);
+  } else {
+    // Prefer a sentence ending after the target length. A long sentence falls
+    // back to a clause break; a hard cut is only for unpunctuated OCR content.
+    end = findBoundary(text, targetEnd, maxEnd, sentenceEnd)
+      || findBoundary(text, targetEnd, maxEnd, clauseEnd)
+      || findBoundary(text, minEnd, maxEnd, `${sentenceEnd}${clauseEnd}`, true);
+  }
+  return { offset, text: text.slice(offset, end || maxEnd) };
+}
 
 const demoDocument: ReaderDocument = {
   title: "智能阅读项目建设方案",
@@ -196,7 +231,11 @@ export default function Home() {
   const crawlAbortRef = useRef<AbortController | null>(null);
 
   const articleText = useMemo(
-    () => [readerDocument.title, readerDocument.description, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])].join("。"),
+    () => [readerDocument.title, readerDocument.description, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])]
+      .join("。")
+      // Source links are useful to display but have no useful spoken form.
+      .replace(/https?:\/\/[^\s<>]+/gi, "。")
+      .replace(/\s+/g, " "),
     [readerDocument],
   );
   const isMeloSynthesizing = speaking && ttsProvider === "melotts" && ttsPlaybackState === "synthesizing";
@@ -558,16 +597,16 @@ export default function Home() {
     setTtsPlaybackState("playing");
   };
 
-  const fetchMeloSegment = async (offset: number, maxChars: number, selectedVoice: string, session: number, audioContext: AudioContext): Promise<MeloAudioSegment | null> => {
-    const text = articleText.slice(offset, offset + maxChars);
-    if (!text || speechSessionRef.current !== session) return null;
+  const fetchMeloSegment = async (offset: number, preferFastStart: boolean, selectedVoice: string, session: number, audioContext: AudioContext): Promise<MeloAudioSegment | null> => {
+    const segment = nextMeloTextSegment(articleText, offset, preferFastStart);
+    if (!segment?.text || speechSessionRef.current !== session) return null;
     const controller = new AbortController();
     meloRequestControllersRef.current.add(controller);
     try {
       const response = await fetch("/v1/tts/synthesize", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, voice_id: selectedVoice, speed: 1 }),
+        body: JSON.stringify({ text: segment.text, voice_id: selectedVoice, speed: 1 }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -575,7 +614,7 @@ export default function Home() {
         throw new Error(result.message || "MeloTTS 合成失败。");
       }
       const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
-      return speechSessionRef.current === session ? { offset, text, audioBuffer } : null;
+      return speechSessionRef.current === session ? { offset, text: segment.text, audioBuffer } : null;
     } finally {
       meloRequestControllersRef.current.delete(controller);
     }
@@ -585,21 +624,21 @@ export default function Home() {
     if (offset >= articleText.length || speechSessionRef.current !== session) return;
     const existing = meloPrefetchRef.current;
     if (existing?.session === session && existing.offset === offset) return;
-    const promise = fetchMeloSegment(offset, MELOTTS_SEGMENT_CHARS, selectedVoice, session, audioContext);
+    const promise = fetchMeloSegment(offset, false, selectedVoice, session, audioContext);
     // The promise is deliberately awaited at the segment boundary. Attach a
     // handler now so an aborted background request never becomes unhandled.
     void promise.catch(() => undefined);
     meloPrefetchRef.current = { session, offset, promise };
   };
 
-  const playMeloSegment = async (offset: number, selectedVoice: string, session: number, audioContext: AudioContext, prepared?: MeloAudioSegment | null) => {
+  const playMeloSegment = async (offset: number, selectedVoice: string, session: number, audioContext: AudioContext, prepared?: MeloAudioSegment | null, preferFastStart = false) => {
     let nextSegment = prepared;
     try {
       if (!nextSegment) {
         setTtsPlaybackState("synthesizing");
         nextSegment = await fetchMeloSegment(
           offset,
-          offset === 0 ? MELOTTS_INITIAL_SEGMENT_CHARS : MELOTTS_SEGMENT_CHARS,
+          preferFastStart,
           selectedVoice,
           session,
           audioContext,
@@ -672,7 +711,7 @@ export default function Home() {
     setSpeechProgress(Math.round((offset / articleText.length) * 100));
     setSpeaking(true);
     setTtsPlaybackState("synthesizing");
-    void playMeloSegment(offset, selectedVoice, session, audioContext);
+    void playMeloSegment(offset, selectedVoice, session, audioContext, undefined, true);
   };
 
   const playSpeech = () => {
