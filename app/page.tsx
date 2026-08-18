@@ -4,6 +4,7 @@ import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type View = "create" | "processing" | "reader" | "library" | "history" | "api";
 type SourceType = "file" | "url";
+type MobileEntryMode = "file" | "url" | "clipboard";
 type LocalAuthMode = "signin" | "register";
 type TtsPlaybackState = "idle" | "synthesizing" | "playing";
 
@@ -54,6 +55,7 @@ interface AuthUser {
   tenant_id: string;
   display_name: string;
   email: string | null;
+  phone: string | null;
   auth_mode: "platform" | "local";
 }
 
@@ -76,7 +78,11 @@ const MELOTTS_INITIAL_TARGET_CHARS = 42;
 const MELOTTS_INITIAL_MAX_CHARS = 86;
 const MELOTTS_SEGMENT_TARGET_CHARS = 110;
 const MELOTTS_SEGMENT_MAX_CHARS = 180;
-const TTS_VOICE_VALUE_SEPARATOR = "\u001f";
+const WEB_ADDRESS_PATTERN = /^(https?:\/\/)?(?:(?:[a-z0-9-]+\.)+[a-z]{2,}|localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?(?:[/?#][^\s]*)?$/i;
+
+function isWebAddress(value: string): boolean {
+  return WEB_ADDRESS_PATTERN.test(value.trim());
+}
 
 function findBoundary(text: string, from: number, to: number, punctuation: string, reverse = false): number | null {
   if (reverse) {
@@ -127,7 +133,7 @@ const demoDocument: ReaderDocument = {
     title: "从静态文档到可听、可搜索的知识",
     paragraphs: [
       "企业中的知识往往分散在网页、PDF、演示文稿和电子表格里。声阅将这些不同的内容统一转换为结构化网页，保留标题、段落、表格与图片的阅读层次。",
-      "转换完成后，用户可以像阅读杂志一样浏览，也可以选择音色连续收听。原文件与 H5 成品会作为同一份资料的两种交付形式。",
+      "转换完成后，用户可以像阅读杂志一样浏览，也可以一键连续收听。原文件与 H5 成品会作为同一份资料的两种交付形式。",
     ],
   },
   {
@@ -175,8 +181,11 @@ function escapeHtml(value: string): string {
 
 export default function Home() {
   const [view, setView] = useState<View>("create");
+  const [viewHistory, setViewHistory] = useState<View[]>([]);
   const [sourceType, setSourceType] = useState<SourceType>("file");
+  const [mobileEntryMode, setMobileEntryMode] = useState<MobileEntryMode>("file");
   const [url, setUrl] = useState("");
+  const [clipboardContent, setClipboardContent] = useState("");
   const [urlError, setUrlError] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -185,7 +194,7 @@ export default function Home() {
   const [voiceName, setVoiceName] = useState("");
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [privateTtsVoices, setPrivateTtsVoices] = useState<PrivateTtsVoice[]>([]);
-  const [ttsProvider, setTtsProvider] = useState<"browser" | "melotts">("browser");
+  const [ttsProvider, setTtsProvider] = useState<"browser" | "melotts">("melotts");
   const [speaking, setSpeaking] = useState(false);
   const [ttsPlaybackState, setTtsPlaybackState] = useState<TtsPlaybackState>("idle");
   const [speechProgress, setSpeechProgress] = useState(0);
@@ -200,6 +209,11 @@ export default function Home() {
   const [shareTtlHours, setShareTtlHours] = useState(168);
   const [shareAllowDownload, setShareAllowDownload] = useState(true);
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
+  const [mobileReaderMenuOpen, setMobileReaderMenuOpen] = useState(false);
+  const [mobileAccountOpen, setMobileAccountOpen] = useState(false);
+  const [phoneToBind, setPhoneToBind] = useState("");
+  const [phoneBinding, setPhoneBinding] = useState(false);
+  const [phoneBindingError, setPhoneBindingError] = useState("");
   const [isSharing, setIsSharing] = useState(false);
   const [shareError, setShareError] = useState("");
   const [storedDocuments, setStoredDocuments] = useState<StoredDocument[]>([]);
@@ -213,7 +227,7 @@ export default function Home() {
   const [signInUrl, setSignInUrl] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
   const [localAuthMode, setLocalAuthMode] = useState<LocalAuthMode>("signin");
-  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPhone, setLoginPhone] = useState("");
   const [loginName, setLoginName] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginPasswordConfirmation, setLoginPasswordConfirmation] = useState("");
@@ -229,6 +243,7 @@ export default function Home() {
   const speechOffsetRef = useRef(0);
   const speechSessionRef = useRef(0);
   const crawlAbortRef = useRef<AbortController | null>(null);
+  const processingSessionRef = useRef(0);
 
   const articleText = useMemo(
     () => [readerDocument.title, readerDocument.description, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])]
@@ -282,7 +297,10 @@ export default function Home() {
       .then((response) => response.json())
       .then((result: { authenticated?: boolean; user?: AuthUser | null; local_development?: boolean; sign_in_url?: string | null }) => {
         if (!active) return;
-        setCurrentUser(result.authenticated && result.user ? result.user : null);
+        const authenticatedUser = result.authenticated && result.user ? result.user : null;
+        setCurrentUser(authenticatedUser);
+        setLibraryLoading(Boolean(authenticatedUser));
+        setLibraryError("");
         setLocalDevelopment(Boolean(result.local_development));
         setSignInUrl(result.sign_in_url || "");
         setAuthReady(true);
@@ -298,10 +316,30 @@ export default function Home() {
     fetch("/v1/tts/voices", { cache: "no-store" })
       .then(async (response) => ({ response, result: await response.json() as { items?: PrivateTtsVoice[] } }))
       .then(({ response, result }) => {
-        if (!active || !response.ok || !Array.isArray(result.items) || !result.items.length) return;
+        if (!active) return;
+        if (!response.ok || !Array.isArray(result.items) || !result.items.length) {
+          setTtsProvider("browser");
+          return;
+        }
         setPrivateTtsVoices(result.items);
+        setTtsProvider("melotts");
       })
       .catch(() => { if (active) setTtsProvider("browser"); });
+    return () => { active = false; };
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    let active = true;
+    fetch("/v1/documents", { cache: "no-store" })
+      .then(async (response) => ({ response, result: await response.json() as { items?: StoredDocument[]; message?: string } }))
+      .then(({ response, result }) => {
+        if (!active) return;
+        if (!response.ok || !Array.isArray(result.items)) throw new Error(result.message || "知识库加载失败。");
+        setStoredDocuments(result.items);
+      })
+      .catch((error) => { if (active) setLibraryError(error instanceof Error ? error.message : "知识库加载失败。"); })
+      .finally(() => { if (active) setLibraryLoading(false); });
     return () => { active = false; };
   }, [currentUser?.id]);
 
@@ -313,6 +351,27 @@ export default function Home() {
     return false;
   };
 
+  const navigateTo = (nextView: View) => {
+    if (view !== nextView) setViewHistory((history) => [...history, view]);
+    setView(nextView);
+  };
+
+  const goBack = (fallback: View = "create") => {
+    const previous = viewHistory.at(-1) || fallback;
+    setViewHistory((history) => history.slice(0, -1));
+    setView(previous);
+  };
+
+  const leaveProcessing = () => {
+    processingSessionRef.current += 1;
+    crawlAbortRef.current?.abort();
+    crawlAbortRef.current = null;
+    setIsCrawling(false);
+    setIsUploading(false);
+    setProcessingError("");
+    goBack();
+  };
+
   const signInLocal = async () => {
     if (loginSubmitting) return;
     setLoginSubmitting(true);
@@ -321,11 +380,13 @@ export default function Home() {
       const response = await fetch("/v1/auth/local-signin", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
+        body: JSON.stringify({ phone: loginPhone, password: loginPassword }),
       });
       const result = await response.json() as { user?: AuthUser; message?: string };
       if (!response.ok || !result.user) throw new Error(result.message || "登录失败，请稍后重试。");
       setCurrentUser(result.user);
+      setLibraryLoading(true);
+      setLibraryError("");
       setLoginOpen(false);
       setLoginPassword("");
       setView("create");
@@ -349,11 +410,13 @@ export default function Home() {
       const response = await fetch("/v1/auth/local-register", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email: loginEmail, display_name: loginName, password: loginPassword }),
+        body: JSON.stringify({ phone: loginPhone, display_name: loginName, password: loginPassword }),
       });
       const result = await response.json() as { user?: AuthUser; message?: string };
       if (!response.ok || !result.user) throw new Error(result.message || "注册失败，请稍后重试。");
       setCurrentUser(result.user);
+      setLibraryLoading(true);
+      setLibraryError("");
       setLoginOpen(false);
       setLoginPassword("");
       setLoginPasswordConfirmation("");
@@ -378,9 +441,32 @@ export default function Home() {
     setPrivateTtsVoices([]);
     setTtsProvider("browser");
     setStoredDocuments([]);
+    setLibraryLoading(false);
     setSearchHits([]);
     setView("create");
     setNotice("已退出本地体验账号。");
+  };
+
+  const bindCurrentAccountPhone = async () => {
+    if (phoneBinding || !currentUser || currentUser.auth_mode !== "local") return;
+    setPhoneBinding(true);
+    setPhoneBindingError("");
+    try {
+      const response = await fetch("/v1/auth/local-bind-phone", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ phone: phoneToBind }),
+      });
+      const result = await response.json() as { user?: AuthUser; message?: string };
+      if (!response.ok || !result.user) throw new Error(result.message || "手机号绑定失败，请稍后重试。");
+      setCurrentUser(result.user);
+      setPhoneToBind("");
+      setNotice("手机号已绑定，现有资料已保留在该账户下。");
+    } catch (error) {
+      setPhoneBindingError(error instanceof Error ? error.message : "手机号绑定失败，请稍后重试。");
+    } finally {
+      setPhoneBinding(false);
+    }
   };
 
   const loadLibrary = async () => {
@@ -401,23 +487,26 @@ export default function Home() {
 
   const openLibrary = () => {
     if (!requireLogin()) return;
-    setView("library");
+    navigateTo("library");
     void loadLibrary();
   };
 
   const openHistory = () => {
     if (!requireLogin()) return;
-    setView("history");
+    navigateTo("history");
     void loadLibrary();
   };
 
-  const startProcessing = async () => {
-    if (!selectedFile || isUploading) return;
+  const startProcessing = async (fileToProcess = selectedFile) => {
+    if (!fileToProcess || isUploading) return;
     if (!requireLogin()) return;
+    const processingSession = processingSessionRef.current + 1;
+    processingSessionRef.current = processingSession;
     crawlAbortRef.current?.abort();
     crawlAbortRef.current = null;
     setSourceType("file");
-    setProcessingName(selectedFile.name);
+    setMobileEntryMode("file");
+    setProcessingName(fileToProcess.name);
     setProcessingError("");
     setNotice("");
     setProgress(12);
@@ -425,30 +514,33 @@ export default function Home() {
     setView("processing");
     try {
       const form = new FormData();
-      form.append("file", selectedFile);
+      form.append("file", fileToProcess);
       const response = await fetch("/v1/documents:upload", { method: "POST", body: form });
       const result = await response.json() as { document?: { id?: string; error_message?: string }; reader?: Omit<ReaderDocument, "documentId"> | null; message?: string };
       if (!response.ok || !result.document?.id || !result.reader) {
         throw new Error(result.document?.error_message || result.message || "文档转换失败。");
       }
+      if (processingSessionRef.current !== processingSession) return;
       setReaderDocument({ ...result.reader, documentId: result.document.id });
       setProcessingName(result.reader.title);
       setProgress(100);
-      window.setTimeout(() => setView("reader"), 450);
+      void loadLibrary();
+      window.setTimeout(() => { if (processingSessionRef.current === processingSession) setView("reader"); }, 450);
     } catch (error) {
+      if (processingSessionRef.current !== processingSession) return;
       setProcessingError(error instanceof Error ? error.message : "文档上传或转换失败。");
       setProgress((current) => Math.min(current, 88));
     } finally {
-      setIsUploading(false);
+      if (processingSessionRef.current === processingSession) setIsUploading(false);
     }
   };
 
-  const submitUrl = async () => {
+  const submitUrl = async (urlToImport = url) => {
     if (isCrawling) return;
     if (!requireLogin()) return;
     let parsed: URL;
     try {
-      const candidate = /^https?:\/\//i.test(url.trim()) ? url.trim() : `https://${url.trim()}`;
+      const candidate = /^https?:\/\//i.test(urlToImport.trim()) ? urlToImport.trim() : `https://${urlToImport.trim()}`;
       parsed = new URL(candidate);
       if (!/^https?:$/.test(parsed.protocol)) throw new Error("invalid");
       setUrl(parsed.toString());
@@ -458,7 +550,11 @@ export default function Home() {
       return;
     }
 
+    const processingSession = processingSessionRef.current + 1;
+    processingSessionRef.current = processingSession;
+
     setSourceType("url");
+    setMobileEntryMode("url");
     setProcessingName(parsed.hostname);
     setProgress(8);
     setProcessingError("");
@@ -479,19 +575,21 @@ export default function Home() {
       if (!result.document?.id || !result.reader || !result.reader.title || !result.reader.description || !Array.isArray(result.reader.sections) || result.reader.sections.length === 0) {
         throw new Error("抓取成功，但结果中没有可阅读正文。");
       }
+      if (processingSessionRef.current !== processingSession) return;
       const document = { ...result.reader, documentId: result.document.id } as ReaderDocument;
       setReaderDocument(document);
       setProcessingName(document.title);
       setProgress(100);
-      window.setTimeout(() => setView("reader"), 450);
+      void loadLibrary();
+      window.setTimeout(() => { if (processingSessionRef.current === processingSession) setView("reader"); }, 450);
     } catch (error) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || processingSessionRef.current !== processingSession) return;
       setProcessingError(error instanceof Error ? error.message : "网页抓取失败。");
       setProgress((current) => Math.min(current, 88));
     } finally {
       if (crawlAbortRef.current === controller) {
         crawlAbortRef.current = null;
-        setIsCrawling(false);
+        if (processingSessionRef.current === processingSession) setIsCrawling(false);
       }
     }
   };
@@ -506,6 +604,7 @@ export default function Home() {
     crawlAbortRef.current?.abort();
     crawlAbortRef.current = null;
     setSourceType("file");
+    setMobileEntryMode("file");
     setIsCrawling(false);
     setSelectedFile(file);
     setNotice("");
@@ -694,7 +793,7 @@ export default function Home() {
     }
   };
 
-  const speakWithMeloTts = (requestedOffset: number, selectedVoice = voiceName) => {
+  const speakWithMeloTts = (requestedOffset: number, selectedVoice = privateTtsVoices[0]?.id || "") => {
     if (!articleText || !selectedVoice) {
       setNotice("MeloTTS 音色尚未就绪，请稍后再试。");
       return;
@@ -719,31 +818,20 @@ export default function Home() {
       stopSpeech(false);
       return;
     }
-    if (ttsProvider === "melotts" && privateTtsVoices.length) {
-      speakWithMeloTts(speechProgress >= 100 ? 0 : speechOffsetRef.current);
+    if (ttsProvider === "melotts") {
+      if (privateTtsVoices.length) {
+        speakWithMeloTts(speechProgress >= 100 ? 0 : speechOffsetRef.current);
+        return;
+      }
+      setNotice("MeloTTS 正在准备默认音色，请稍后再试。");
       return;
     }
     speakFromOffset(speechProgress >= 100 ? 0 : speechOffsetRef.current);
   };
 
-  const changeVoice = (nextVoice: string, nextProvider = ttsProvider) => {
-    setTtsProvider(nextProvider);
-    setVoiceName(nextVoice);
-    if (!speaking) return;
-    if (nextProvider === "melotts" && privateTtsVoices.length) {
-      speakWithMeloTts(speechOffsetRef.current, nextVoice);
-      return;
-    }
-    speakFromOffset(speechOffsetRef.current, nextVoice);
-  };
-
-  const selectVoice = (value: string) => {
-    const separatorIndex = value.indexOf(TTS_VOICE_VALUE_SEPARATOR);
-    if (separatorIndex < 0) return;
-    const provider = value.slice(0, separatorIndex);
-    const voice = value.slice(separatorIndex + TTS_VOICE_VALUE_SEPARATOR.length);
-    if ((provider !== "browser" && provider !== "melotts") || !voice) return;
-    changeVoice(voice, provider);
+  const handleReaderBack = () => {
+    stopSpeech(false);
+    goBack();
   };
 
   const downloadOriginal = () => {
@@ -774,7 +862,7 @@ export default function Home() {
       return;
     }
     const sections = readerDocument.sections.map((section) => `<section><p class="eyebrow">${escapeHtml(section.eyebrow)}</p><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(readerDocument.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button,.player select{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p><h1>${escapeHtml(readerDocument.title)}</h1><p class="deck">${escapeHtml(readerDocument.description)}</p>${sections}</main><div class="player"><button id="play">▶ 开始播放</button><select id="voices" aria-label="选择音色"></select></div><script>const text=document.querySelector('main').innerText,v=document.querySelector('#voices'),b=document.querySelector('#play');function load(){const a=speechSynthesis.getVoices();v.innerHTML=a.map((x,i)=>'<option value="'+i+'">'+x.name+' · '+x.lang+'</option>').join('');}load();speechSynthesis.onvoiceschanged=load;b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text),a=speechSynthesis.getVoices();u.voice=a[v.value]||null;u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(readerDocument.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p><h1>${escapeHtml(readerDocument.title)}</h1><p class="deck">${escapeHtml(readerDocument.description)}</p>${sections}</main><div class="player"><button id="play">▶ 开始播放</button></div><script>const text=document.querySelector('main').innerText,b=document.querySelector('#play');b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const href = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -875,7 +963,7 @@ export default function Home() {
       setSourceType(item.source_type === "upload" ? "file" : "url");
       setSelectedFile(null);
       setSearchHits([]);
-      setView("reader");
+      navigateTo("reader");
     } catch (error) {
       setLibraryError(error instanceof Error ? error.message : "无法打开阅读页。");
     }
@@ -905,37 +993,82 @@ export default function Home() {
     }
   };
 
-  const pasteUrlFromClipboard = async () => {
-    setSourceType("url");
+  const pasteFromClipboard = async () => {
+    setMobileEntryMode("clipboard");
+    setUrlError("");
     try {
-      const value = await navigator.clipboard.readText();
-      setUrl(value);
-      setUrlError("");
+      const value = (await navigator.clipboard.readText()).trim();
+      if (!value) throw new Error("empty clipboard");
+      setClipboardContent(value);
+      setNotice(isWebAddress(value)
+        ? "已识别为网页链接；确认后会抓取网页正文。"
+        : "已识别为文字内容；确认后会按 TXT 文档导入。");
     } catch {
-      setNotice("请在网页链接输入框中手动粘贴链接。");
+      setNotice("无法读取剪贴板，请在下方手动粘贴文字或网页链接。");
     }
   };
 
+  const chooseMobileEntry = (mode: MobileEntryMode) => {
+    setMobileEntryMode(mode);
+    setSourceType(mode === "file" ? "file" : "url");
+    setUrlError("");
+  };
+
+  const startMobileProcessing = () => {
+    if (mobileEntryMode === "file") {
+      if (selectedFile) void startProcessing();
+      else document.getElementById("mobile-file-input")?.click();
+      return;
+    }
+    if (mobileEntryMode === "clipboard") {
+      const content = clipboardContent.trim();
+      if (!content) {
+        setUrlError("请先读取或粘贴剪贴板内容。");
+        setNotice("支持网页链接或任意文字内容；文字会按 TXT 文档导入。");
+        return;
+      }
+      if (isWebAddress(content)) {
+        setUrl(content);
+        void submitUrl(content);
+        return;
+      }
+      const textFile = new File([content], "剪贴板内容.txt", { type: "text/plain;charset=utf-8" });
+      setSelectedFile(textFile);
+      void startProcessing(textFile);
+      return;
+    }
+    if (!url.trim()) {
+      setUrlError("请先粘贴有效的网页地址。");
+      setNotice("网页链接不会自动猜测，请粘贴完整地址后再确认。");
+      return;
+    }
+    void submitUrl();
+  };
+
   const renderMobileCreate = () => {
-    const mobileVoices: Array<{ provider: "browser" | "melotts"; value: string; title: string; detail: string }> = [
-      ...privateTtsVoices.slice(0, 1).map((voice) => ({ provider: "melotts" as const, value: voice.id, title: voice.label, detail: "私有模型 · 标准" })),
-      ...voices.slice(0, 2).map((voice, index) => ({ provider: "browser" as const, value: voice.name, title: index === 0 ? "即时女声" : "即时男声", detail: "系统语音 · 即时" })),
-    ];
-    const materialItems = storedDocuments.length
-      ? storedDocuments.slice(0, 3).map((item) => ({ id: item.id, type: item.source_type === "url" ? "网页" : item.filename?.split(".").pop()?.toUpperCase() || "文件", title: item.title, meta: item.status === "ready" ? `已完成 · 约 ${Math.max(1, Math.ceil(item.word_count / 350))} 分钟` : `处理中 · ${item.progress}%`, stored: item }))
-      : [
-        { id: "sample-web", type: "网页", title: "为什么伟大不能被计划", meta: "重听免费 · 28 分钟" },
-        { id: "sample-doc", type: "DOC", title: "Q2 团队复盘纪要", meta: "重听免费 · 15 分钟" },
-        { id: "sample-pdf", type: "PDF", title: "消费电子趋势报告", meta: "进行中 · 42% · 剩 46 分钟" },
-      ];
-    const sourceReady = sourceType === "file" ? Boolean(selectedFile) : Boolean(url.trim());
-    const estimatedWords = selectedFile ? Math.max(1_000, Math.round(selectedFile.size / 7)) : readerDocument.wordCount;
-    const previewTitle = selectedFile ? selectedFile.name.replace(/\.[^.]+$/, "") : sourceType === "url" && url ? "网页内容准备就绪" : "2026 消费电子年度趋势报告";
-    const previewWords = sourceReady ? estimatedWords : 20_000;
-    const previewMinutes = sourceReady ? Math.max(2, Math.ceil(estimatedWords / 350)) : 80;
+    const materialItems = storedDocuments.slice(0, 3).map((item) => ({ id: item.id, type: item.source_type === "url" ? "网页" : item.filename?.split(".").pop()?.toUpperCase() || "文件", title: item.title, meta: item.status === "ready" ? `已完成 · 约 ${Math.max(1, Math.ceil(item.word_count / 350))} 分钟` : `处理中 · ${item.progress}%`, stored: item }));
+    const clipboardIsWebAddress = isWebAddress(clipboardContent);
+    const sourceReady = mobileEntryMode === "file"
+      ? Boolean(selectedFile)
+      : mobileEntryMode === "clipboard"
+        ? Boolean(clipboardContent.trim())
+        : Boolean(url.trim());
+    const estimatedWords = selectedFile
+      ? Math.max(1_000, Math.round(selectedFile.size / 7))
+      : mobileEntryMode === "clipboard" && !clipboardIsWebAddress
+        ? clipboardContent.trim().length
+        : 0;
+    const previewTitle = selectedFile
+      ? selectedFile.name.replace(/\.[^.]+$/, "")
+      : mobileEntryMode === "clipboard" && clipboardContent.trim()
+        ? clipboardIsWebAddress ? "网页内容准备就绪" : "剪贴板文字内容"
+        : mobileEntryMode === "url" && url.trim()
+          ? "网页内容准备就绪"
+          : "等待导入内容";
+    const previewMinutes = estimatedWords ? Math.max(1, Math.ceil(estimatedWords / 350)) : 0;
 
     return <main className="mobile-station-page">
-      <div className="mobile-phone-status" aria-hidden="true"><strong>9:41</strong><span>••• ◇ ◻</span></div>
+      <div className="mobile-phone-status"><strong>9:41</strong><button className="mobile-account-trigger" onClick={() => setMobileAccountOpen(true)} aria-label="打开账户设置">我的</button></div>
       <section className="mobile-station-hero">
         <div className="mobile-station-brand"><span className="station-mark">听</span><div><h1>听读电台</h1><p>上传即听 · 按量计费</p></div></div>
         <button className="credit-pill" onClick={openLibrary} aria-label="查看我的资料">⚡ <strong>1,250</strong></button>
@@ -943,31 +1076,117 @@ export default function Home() {
 
       <section className="mobile-import-card" aria-label="上传文档或网页">
         <input className="mobile-file-input" id="mobile-file-input" type="file" accept=".docx,.md,.txt,.xlsx,.pdf" onChange={(event) => acceptFile(event.target.files?.[0])} />
-        {sourceType === "file" ? <div className={`mobile-drop-zone ${selectedFile ? "is-ready" : ""} ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
-          {selectedFile ? <><span className="mobile-file-icon">{selectedFile.name.split(".").pop()?.toUpperCase()}</span><strong>{selectedFile.name}</strong><small>{(selectedFile.size / 1024 / 1024).toFixed(1)} MB · 已选择</small><label className="mobile-file-trigger" htmlFor="mobile-file-input">更换文件</label></> : <><span className="mobile-upload-icon">▯</span><strong>上传文档 / 粘贴网页</strong><small>拖入 .docx · .pdf，或粘贴链接</small></>}
-        </div> : <div className="mobile-url-zone"><span className="mobile-upload-icon">↗</span><strong>粘贴网页链接</strong><input value={url} onChange={(event) => { setUrl(event.target.value); setUrlError(""); }} onKeyDown={(event) => event.key === "Enter" && void submitUrl()} placeholder="https://example.com/article" /><small>{urlError || "服务端将提取真实正文"}</small></div>}
+        {mobileEntryMode === "file" ? <div className={`mobile-drop-zone ${selectedFile ? "is-ready" : ""} ${dragging ? "dragging" : ""}`} role="button" tabIndex={0} aria-label="选择要上传的文档" onClick={() => document.getElementById("mobile-file-input")?.click()} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); document.getElementById("mobile-file-input")?.click(); } }} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
+          {selectedFile ? <><span className="mobile-file-icon">{selectedFile.name.split(".").pop()?.toUpperCase()}</span><strong>{selectedFile.name}</strong><small>{(selectedFile.size / 1024 / 1024).toFixed(1)} MB · 已选择</small><span className="mobile-file-trigger">更换文件</span></> : <><span className="mobile-upload-icon">▯</span><strong>上传文档</strong><small>点击选择或拖入 DOCX、PDF、XLSX、MD、TXT</small></>}
+        </div> : mobileEntryMode === "clipboard" ? <div className="mobile-clipboard-zone">
+          <span className="mobile-upload-icon">▣</span><strong>从剪贴板导入</strong>
+          <textarea aria-label="剪贴板内容" value={clipboardContent} onChange={(event) => { setClipboardContent(event.target.value); setUrlError(""); }} placeholder="点击读取剪贴板，或在这里粘贴文字 / 网页链接" />
+          <div className="mobile-url-actions"><button className="mobile-clipboard-read" onClick={() => void pasteFromClipboard()}>读取剪贴板</button><button className="mobile-url-next" onClick={startMobileProcessing} disabled={isUploading || isCrawling}>{isUploading || isCrawling ? "正在处理…" : "下一步，开始收听 →"}</button></div>
+          <small>{urlError || (!clipboardContent.trim() ? "支持网页链接或任意文字；文字将按 TXT 文档导入" : clipboardIsWebAddress ? "已识别为网页链接，将提取网页正文" : `已识别 ${clipboardContent.trim().length.toLocaleString()} 字，将按 TXT 文档导入`)}</small>
+        </div> : <div className="mobile-url-zone"><span className="mobile-upload-icon">↗</span><strong>粘贴网页链接</strong><input value={url} onChange={(event) => { setUrl(event.target.value); setUrlError(""); }} onKeyDown={(event) => event.key === "Enter" && startMobileProcessing()} placeholder="https://example.com/article" /><div className="mobile-url-actions"><button className="mobile-url-next" onClick={startMobileProcessing} disabled={isCrawling}>{isCrawling ? "正在抓取…" : "下一步，开始收听 →"}</button></div><small>{urlError || "粘贴完成后点击下一步，生成可听阅读页"}</small></div>}
         <div className="mobile-source-switch" role="tablist">
-          <button className={sourceType === "file" ? "active" : ""} onClick={() => setSourceType("file")} role="tab" aria-selected={sourceType === "file"}>▤ 文件</button>
-          <button className={sourceType === "url" ? "active" : ""} onClick={() => setSourceType("url")} role="tab" aria-selected={sourceType === "url"}>⌁ 网页</button>
-          <button onClick={() => void pasteUrlFromClipboard()}>▣ 剪贴板</button>
+          <button className={mobileEntryMode === "file" ? "active" : ""} onClick={() => chooseMobileEntry("file")} role="tab" aria-selected={mobileEntryMode === "file"}>▤ 文件</button>
+          <button className={mobileEntryMode === "url" ? "active" : ""} onClick={() => chooseMobileEntry("url")} role="tab" aria-selected={mobileEntryMode === "url"}>⌁ 网页</button>
+          <button className={mobileEntryMode === "clipboard" ? "active" : ""} onClick={() => { chooseMobileEntry("clipboard"); void pasteFromClipboard(); }} role="tab" aria-selected={mobileEntryMode === "clipboard"}>▣ 剪贴板</button>
         </div>
       </section>
 
       <section className="mobile-confirm-card">
-        <p className="mobile-status">解析完成 · 待确认</p>
+        <p className="mobile-status">{sourceReady ? "内容已就绪 · 待确认" : "上传后自动解析 · 待确认"}</p>
         <div className="mobile-confirm-title"><span className="mobile-wave">▮▯▮</span><h2>{previewTitle}</h2></div>
-        <p className="mobile-confirm-copy">正文约 <b>{previewWords.toLocaleString()} 字</b> · 约 <b>{previewMinutes} 分钟</b> · 已跳过图表/参考文献</p>
-        <div className="mobile-voice-grid" aria-label="选择音色">
-          {mobileVoices.length ? mobileVoices.map((voice) => <button key={`${voice.provider}-${voice.value}`} className={ttsProvider === voice.provider && voiceName === voice.value ? "selected" : ""} onClick={() => changeVoice(voice.value, voice.provider)}><strong>{voice.title}</strong><small>{voice.detail}</small></button>) : <button className="selected" onClick={() => setTtsProvider("browser")}><strong>系统语音</strong><small>正在加载可用音色</small></button>}
-        </div>
+        <p className="mobile-confirm-copy">{estimatedWords ? <>正文约 <b>{estimatedWords.toLocaleString()} 字</b> · 约 <b>{previewMinutes} 分钟</b></> : sourceReady ? "导入后将提取正文并计算时长" : "导入后自动识别字数与收听时长"} · 已跳过图表/参考文献</p>
         <div className="mobile-estimate"><div><span>预计消耗</span><strong>⚡200</strong></div><div className="mobile-balance"><span>余额</span><strong>1,250</strong><small>充足</small></div></div>
         <p className="mobile-refund">✓ 失败自动返还 · 合成后重听免费</p>
-        <button className="mobile-confirm-button" onClick={() => { if (sourceType === "file") { if (selectedFile) void startProcessing(); else document.getElementById("mobile-file-input")?.click(); } else if (url.trim()) void submitUrl(); }} disabled={isUploading || isCrawling}>{isUploading || isCrawling ? "正在处理…" : "确认并开始收听"}</button>
+        <button className="mobile-confirm-button" onClick={startMobileProcessing} disabled={isUploading || isCrawling}>{isUploading || isCrawling ? "正在处理…" : "确认并开始收听"}</button>
       </section>
 
-      <section className="mobile-materials"><div className="mobile-section-heading"><h2>我的资料</h2><button onClick={openLibrary}>全部 →</button></div><div className="mobile-material-list">{materialItems.map((item) => <button key={item.id} className="mobile-material-item" onClick={() => "stored" in item && item.stored ? void openStoredDocument(item.stored) : (() => { setReaderDocument(demoDocument); setView("reader"); })()}><span className={`mobile-type ${item.type.toLowerCase()}`}>{item.type}</span><span><strong>{item.title}</strong><small>{item.meta}</small></span><i>▶</i></button>)}</div></section>
+      <section className="mobile-materials"><div className="mobile-section-heading"><h2>我的资料</h2><button onClick={openLibrary}>全部 →</button></div><div className="mobile-material-list">{!authReady || libraryLoading ? <p className="mobile-material-placeholder">正在同步你的真实资料…</p> : libraryError ? <p className="mobile-material-placeholder" role="alert">资料加载失败，请点击“全部”后重试。</p> : materialItems.length ? materialItems.map((item) => <button key={item.id} className="mobile-material-item" onClick={() => void openStoredDocument(item.stored)}><span className={`mobile-type ${item.type.toLowerCase()}`}>{item.type}</span><span><strong>{item.title}</strong><small>{item.meta}</small></span><i>▶</i></button>) : <div className="mobile-material-empty"><strong>还没有资料</strong><small>完成一次文件、网页或剪贴板导入后，资料会显示在这里。</small></div>}</div></section>
+      {renderMobileAccountSheet()}
       {notice && <div className="mobile-notice" role="status">{notice}</div>}
     </main>;
+  };
+
+  const renderMobileAccountSheet = () => {
+    if (!mobileAccountOpen) return null;
+    const phone = currentUser?.phone;
+    const maskedPhone = phone ? `${phone.slice(0, 3)} **** ${phone.slice(-4)}` : "已通过平台账户登录";
+    return <div className="mobile-sheet-backdrop" role="presentation"><section className="mobile-action-sheet mobile-account-sheet" role="dialog" aria-modal="true" aria-label="账户设置"><div className="mobile-sheet-handle" /><div className="mobile-account-summary"><strong>{currentUser?.display_name}</strong><small>{maskedPhone}</small><span>资料、索引与分享记录仅归属当前账户</span></div>{currentUser?.auth_mode === "local" && !phone && <div className="mobile-phone-bind"><label>绑定手机号<input type="tel" value={phoneToBind} onChange={(event) => { setPhoneToBind(event.target.value); setPhoneBindingError(""); }} inputMode="tel" autoComplete="tel-national" placeholder="请输入中国大陆手机号" /></label><button onClick={() => void bindCurrentAccountPhone()} disabled={phoneBinding}>{phoneBinding ? "正在绑定…" : "绑定并保留现有资料"}</button>{phoneBindingError && <small role="alert">{phoneBindingError}</small>}</div>}<button onClick={() => { setMobileAccountOpen(false); void signOut(); }}><span>⇥</span>退出登录</button><button className="mobile-action-cancel" onClick={() => setMobileAccountOpen(false)}>取消</button></section></div>;
+  };
+
+  const renderMobileShareSheet = () => {
+    if (!sharePanelOpen) return null;
+    return <div className="mobile-sheet-backdrop" role="presentation">
+      <section className="mobile-share-sheet" role="dialog" aria-modal="true" aria-label="转发阅读页">
+        <div className="mobile-sheet-handle" />
+        <header><div><p>转发阅读页</p><small>链接仅供阅读，可随时关闭</small></div><button onClick={() => setSharePanelOpen(false)} aria-label="关闭分享面板">×</button></header>
+        {shareLink ? <>
+          <div className="mobile-share-link"><input readOnly value={shareLink} aria-label="分享链接" /><button onClick={() => void copyToClipboard(shareLink, "分享链接已复制。")}><AppIcon name="copy" />复制</button></div>
+          <p className="mobile-share-expiry">有效至 {shareExpiresAt ? new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(shareExpiresAt)) : "--"}</p>
+          <button className="mobile-sheet-primary" onClick={() => void forwardShare()}>转发链接 <span>↗</span></button>
+          <button className="mobile-sheet-danger" onClick={() => void revokeShare()}>关闭此分享链接</button>
+        </> : <>
+          <div className="mobile-share-options"><label>有效期<select value={shareTtlHours} onChange={(event) => setShareTtlHours(Number(event.target.value))}><option value={24}>24 小时</option><option value={168}>7 天</option><option value={720}>30 天</option></select></label><label className="mobile-share-toggle"><input type="checkbox" checked={shareAllowDownload} onChange={(event) => setShareAllowDownload(event.target.checked)} /><span />允许下载 H5</label></div>
+          <button className="mobile-sheet-primary" onClick={() => void createShare()} disabled={isSharing}>{isSharing ? "正在生成…" : "生成并复制链接"}<span>↗</span></button>
+        </>}
+        {shareError && <p className="mobile-sheet-error" role="alert">{shareError}</p>}
+      </section>
+    </div>;
+  };
+
+  const renderMobileReader = () => {
+    const documentType = selectedFile?.name.split(".").pop()?.toUpperCase() || (readerDocument.sourceUrl ? "网页" : "资料");
+    const duration = Math.max(1, Math.ceil(readerDocument.wordCount / 350));
+    const ttsLabel = ttsProvider === "melotts" ? privateTtsVoices.length ? "MeloTTS · 中文自然女声" : "MeloTTS 正在准备" : "浏览器语音 · 自动回退";
+    return <main className="mobile-route-page mobile-reader-screen">
+      <header className="mobile-route-header"><button onClick={handleReaderBack} aria-label="返回上一页">‹</button><strong>听读</strong><button onClick={() => setMobileReaderMenuOpen(true)} aria-label="更多操作">•••</button></header>
+      <div className="mobile-reader-summary"><span className={`mobile-reader-type ${documentType.toLowerCase()}`}>{documentType}</span><div><strong>{readerDocument.title}</strong><small>{readerDocument.sections.length} 章 · 约 {duration} 分钟 · 已保存</small></div></div>
+      <article className="mobile-reader-article">
+        <p className="mobile-reader-eyebrow">{readerDocument.siteName} · {readerDocument.engine === "demo" ? "阅读示例" : "已生成阅读页"}</p>
+        <h1>{readerDocument.title}</h1>
+        <p className="mobile-reader-deck">{readerDocument.description}</p>
+        {readerDocument.sections.map((section, index) => <section key={section.id} id={section.id}><p className="mobile-reader-section-index">{String(index + 1).padStart(2, "0")} / 文档内容</p><h2>{section.title}</h2>{section.paragraphs.map((paragraph, paragraphIndex) => <p key={`${section.id}-${paragraphIndex}`}>{paragraph}</p>)}</section>)}
+        <p className="mobile-reader-end">— 已读完全文 —</p>
+      </article>
+      <div className="mobile-reader-dock"><button className="mobile-play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}>{speaking ? "Ⅱ" : "▶"}</button><div><strong>{speaking ? "正在朗读" : "准备收听"}</strong><small>{ttsLabel} · {Math.round(speechProgress)}%</small></div><button className="mobile-dock-menu" onClick={() => setMobileReaderMenuOpen(true)} aria-label="打开操作菜单">⋯</button></div>
+      {mobileReaderMenuOpen && <div className="mobile-sheet-backdrop" role="presentation"><section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="阅读操作"><div className="mobile-sheet-handle" /><button onClick={() => { setMobileReaderMenuOpen(false); downloadOriginal(); }}><span>↓</span>{readerDocument.sourceUrl ? "打开原网页" : "下载原文件"}</button><button onClick={() => { setMobileReaderMenuOpen(false); exportH5(); }}><span>⇩</span>一键下载 H5</button><button onClick={() => { setMobileReaderMenuOpen(false); setShareError(""); setSharePanelOpen(true); }}><span>↗</span>生成分享链接</button><button className="mobile-action-cancel" onClick={() => setMobileReaderMenuOpen(false)}>取消</button></section></div>}
+      {renderMobileShareSheet()}
+      {notice && <button className="mobile-inline-notice" onClick={() => setNotice("")}>{notice}<span>×</span></button>}
+    </main>;
+  };
+
+  const renderMobileLibrary = () => <main className="mobile-route-page mobile-library-screen">
+    <header className="mobile-route-header"><button onClick={() => goBack()} aria-label="返回上一页">‹</button><strong>我的资料</strong><button onClick={openHistory} aria-label="查看处理记录">◷</button></header>
+    <section className="mobile-library-hero"><p>个人知识库</p><h1>我的资料</h1><span>{storedDocuments.length} 份资料 · 仅自己可见</span></section>
+    <div className="mobile-search"><span>⌕</span><input aria-label="搜索知识库" value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchLibrary()} placeholder="搜索资料正文…" /><button onClick={() => void searchLibrary()}>搜索</button></div>
+    {libraryError && <p className="mobile-page-error" role="alert">{libraryError}</p>}
+    {searchHits.length > 0 && <section className="mobile-search-results" aria-label="检索结果">{searchHits.map((hit) => <button key={hit.chunk_id} onClick={() => { const item = storedDocuments.find((document) => document.id === hit.document_id); if (item) void openStoredDocument(item); }}><strong>{hit.document_title}</strong><small>{hit.text}</small></button>)}</section>}
+    <section className="mobile-library-list" aria-label="资料列表">{libraryLoading ? <p className="mobile-empty-state">正在读取资料…</p> : storedDocuments.length ? storedDocuments.map((item) => { const type = item.filename?.split(".").pop()?.toUpperCase() || (item.source_type === "url" ? "网页" : "文件"); return <button key={item.id} onClick={() => void openStoredDocument(item)}><span className={`mobile-library-type ${type.toLowerCase()}`}>{type}</span><span><strong>{item.title}</strong><small>{item.status === "ready" ? `已完成 · ${item.word_count.toLocaleString()} 字` : `处理中 · ${item.progress}%`}</small></span><i>›</i></button>; }) : <div className="mobile-empty-state"><strong>还没有资料</strong><p>导入文件或网页后，会自动保存在这里。</p><button onClick={() => setView("create")}>去导入</button></div>}</section>
+    <nav className="mobile-bottom-nav" aria-label="移动端导航"><button onClick={() => setView("create")}>⌂<span>首页</span></button><button className="active">▦<span>资料</span></button><button onClick={openHistory}>◷<span>记录</span></button></nav>
+  </main>;
+
+  const renderMobileHistory = () => <main className="mobile-route-page mobile-library-screen">
+    <header className="mobile-route-header"><button onClick={() => goBack()} aria-label="返回上一页">‹</button><strong>处理记录</strong><button onClick={openLibrary} aria-label="查看我的资料">▦</button></header>
+    <section className="mobile-library-hero"><p>处理中心</p><h1>导入记录</h1><span>文件与网页的转换状态</span></section>
+    {libraryError && <p className="mobile-page-error" role="alert">{libraryError}</p>}
+    <section className="mobile-history-list" aria-label="处理记录列表">{libraryLoading ? <p className="mobile-empty-state">正在读取记录…</p> : storedDocuments.length ? storedDocuments.map((item) => { const type = item.filename?.split(".").pop()?.toUpperCase() || (item.source_type === "url" ? "网页" : "文件"); const status = item.status === "ready" ? "已完成" : item.status === "failed" ? "失败" : "处理中"; return <button key={item.id} onClick={() => item.status === "ready" && void openStoredDocument(item)}><span className={`mobile-history-status ${item.status}`}>{status}</span><span><strong>{item.title}</strong><small>{type} · {new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(item.updated_at))}</small></span><i>{item.status === "ready" ? "›" : ""}</i></button>; }) : <div className="mobile-empty-state"><strong>暂时没有处理记录</strong><p>完成一次导入后，会在这里看到处理状态。</p></div>}</section>
+    <nav className="mobile-bottom-nav" aria-label="移动端导航"><button onClick={() => setView("create")}>⌂<span>首页</span></button><button onClick={openLibrary}>▦<span>资料</span></button><button className="active">◷<span>记录</span></button></nav>
+  </main>;
+
+  const renderMobileProcessing = () => {
+    const isUrlImport = sourceType === "url";
+    const steps = isUrlImport ? ["校验链接", "抓取正文", "整理内容", "生成阅读页"] : ["保存文件", "解析内容", "整理版式", "生成阅读页"];
+    return <main className="mobile-route-page mobile-processing-screen"><header className="mobile-route-header"><button onClick={leaveProcessing} aria-label="取消处理并返回上一页">‹</button><strong>正在处理</strong><span /></header><section className="mobile-processing-card"><div className="mobile-processing-icon">{isUrlImport ? "⌁" : "▤"}</div><p>{isUrlImport ? "正在导入网页" : "正在导入文件"}</p><h1>{processingName || "正在准备资料"}</h1>{processingError ? <div className="mobile-processing-failure" role="alert"><strong>{isUrlImport ? "网页抓取失败" : "文档解析失败"}</strong><span>{processingError}</span><button onClick={leaveProcessing}>返回重新导入</button></div> : <><div className="mobile-processing-progress"><span style={{ width: `${progress}%` }} /></div><div className="mobile-processing-percent"><strong>{progress}%</strong><span>{progress === 100 ? "马上打开阅读页" : "正在整理为可朗读内容"}</span></div><ol>{steps.map((step, index) => <li key={step} className={progress >= (index + 1) * 24 ? "done" : ""}><i>{progress >= (index + 1) * 24 ? "✓" : index + 1}</i>{step}</li>)}</ol></>}</section></main>;
+  };
+
+  const renderMobileApi = () => <main className="mobile-route-page mobile-library-screen"><header className="mobile-route-header"><button onClick={() => goBack()} aria-label="返回上一页">‹</button><strong>接口文档</strong><span /></header><section className="mobile-library-hero"><p>开发者</p><h1>API 文档</h1><span>用于前后端联调的接口契约</span></section><a className="mobile-api-download" href="/openapi.yaml" download>下载 OpenAPI 3.1 <span>↓</span></a><p className="mobile-api-note">上传、网页抓取、资料读取、分享与知识检索均遵循同一份接口契约。</p></main>;
+
+  const renderMobileRoute = () => {
+    if (view === "processing") return renderMobileProcessing();
+    if (view === "reader") return renderMobileReader();
+    if (view === "library") return renderMobileLibrary();
+    if (view === "history") return renderMobileHistory();
+    if (view === "api") return renderMobileApi();
+    return null;
   };
 
   const renderCreate = () => (
@@ -975,7 +1194,7 @@ export default function Home() {
       <section className="hero-copy">
         <div className="signal-pill"><span /> 内容正在变得更好听</div>
         <h1>把任何资料，<br />变成会朗读的网页。</h1>
-        <p>导入网页或文档，自动生成排版清晰的 H5 阅读页，<br className="desktop-break" />一边阅读，一边选择喜欢的声音收听。</p>
+        <p>导入网页或文档，自动生成排版清晰的 H5 阅读页，<br className="desktop-break" />一边阅读，一边立即收听。</p>
       </section>
 
       <section className="import-card" aria-label="导入资料">
@@ -1015,7 +1234,7 @@ export default function Home() {
 
       <section className="trust-row" aria-label="核心优势">
         <div><AppIcon name="lock" /><span><strong>私有存储</strong><small>用户级知识库隔离</small></span></div>
-        <div><span className="mini-wave"><i /><i /><i /></span><span><strong>多音色 TTS</strong><small>语速、音色随时切换</small></span></div>
+        <div><span className="mini-wave"><i /><i /><i /></span><span><strong>即时 TTS</strong><small>默认系统语音，即点即听</small></span></div>
         <div><AppIcon name="download" /><span><strong>双份导出</strong><small>H5 阅读页 + 原文件</small></span></div>
       </section>
     </main>
@@ -1028,14 +1247,14 @@ export default function Home() {
       : [{ label: "文件校验", at: 8 }, { label: "安全保存", at: 24 }, { label: "文档解析", at: 48 }, { label: "结构化", at: 68 }, { label: "生成 H5", at: 82 }, { label: "完成", at: 96 }];
     return (
       <main className="processing-page">
-        <button className="back-link" onClick={() => setView("create")}>← 返回导入</button>
+        <button className="back-link" onClick={leaveProcessing}>← 返回导入</button>
         <section className="processing-card">
           <div className="processing-animation"><span className="doc-sheet"><i /><i /><i /></span><span className="pulse-ring ring-one" /><span className="pulse-ring ring-two" /></div>
           <p className="overline">正在转换</p>
           <h1>{processingName}</h1>
           <p>{processingError ? "未生成任何替代内容" : isUrlImport ? "正在读取目标网站并提取真实正文" : "正在解析上传文件并生成可朗读 H5"}</p>
           {processingError ? (
-            <div className="processing-error" role="alert"><strong>{isUrlImport ? "网页抓取失败" : "文档解析失败"}</strong><p>{processingError}</p><button className="primary-button" onClick={() => setView("create")}>{isUrlImport ? "返回修改网址" : "返回重新选择文件"}</button></div>
+            <div className="processing-error" role="alert"><strong>{isUrlImport ? "网页抓取失败" : "文档解析失败"}</strong><p>{processingError}</p><button className="primary-button" onClick={leaveProcessing}>{isUrlImport ? "返回修改网址" : "返回重新选择文件"}</button></div>
           ) : <>
             <div className="big-progress"><span style={{ width: `${progress}%` }} /></div>
             <div className="progress-meta"><strong>{progress}%</strong><span>{progress === 100 ? "正在打开阅读页" : isUrlImport ? "正在等待目标网站响应" : "正在提取文档文字与结构"}</span></div>
@@ -1050,7 +1269,7 @@ export default function Home() {
   const renderReader = () => (
     <main className="reader-page">
       <aside className="reader-outline">
-        <button className="back-link" onClick={() => { stopSpeech(false); setView("create"); }}>← 返回</button>
+        <button className="back-link" onClick={handleReaderBack}>← 返回</button>
         <div className="outline-file"><span className="pdf-tile">{selectedFile?.name.split(".").pop()?.toUpperCase() || (readerDocument.sourceUrl ? "URL" : "DEMO")}</span><div><strong>{readerDocument.title}</strong><small>{readerDocument.sections.length} 章 · 约 {Math.max(1, Math.ceil(readerDocument.wordCount / 350))} 分钟</small></div></div>
         <p className="outline-title">文章目录</p>
         <nav>{readerDocument.sections.map((section, index) => <a key={section.id} href={`#${section.id}`}><span>{String(index + 1).padStart(2, "0")}</span>{section.title}</a>)}</nav>
@@ -1088,7 +1307,7 @@ export default function Home() {
       <div className="tts-player">
         <button className="play-button" onClick={playSpeech} aria-label={speaking ? (isMeloSynthesizing ? "取消生成" : "暂停播放") : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
         <div className="track-info"><div><strong>{isMeloSynthesizing ? "正在生成音频 · " : speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "melotts" ? "MeloTTS" : "浏览器语音"}</strong><span>{isMeloSynthesizing ? "MeloTTS 正在合成音频，点击暂停可取消" : readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className={`audio-progress${isMeloSynthesizing ? " is-synthesizing" : ""}`}><span style={{ width: `${speechProgress}%` }} /></div></div>
-        <div className="voice-select"><label htmlFor="voice">音色 {ttsProvider === "melotts" ? "· 私有模型" : "· 即时语音"}</label><select id="voice" value={`${ttsProvider}${TTS_VOICE_VALUE_SEPARATOR}${voiceName}`} onChange={(event) => selectVoice(event.target.value)}>{voices.length ? <optgroup label="浏览器即时语音">{voices.slice(0, 12).map((voice) => <option key={`browser-${voice.name}-${voice.lang}`} value={`browser${TTS_VOICE_VALUE_SEPARATOR}${voice.name}`}>{voice.name} · {voice.lang}</option>)}</optgroup> : <option value={`browser${TTS_VOICE_VALUE_SEPARATOR}system-default`}>系统默认音色</option>}{privateTtsVoices.length ? <optgroup label="MeloTTS 私有模型">{privateTtsVoices.map((voice) => <option key={`melotts-${voice.id}`} value={`melotts${TTS_VOICE_VALUE_SEPARATOR}${voice.id}`}>{voice.label} · {voice.language}</option>)}</optgroup> : null}</select></div>
+        <div className="voice-select" aria-label="朗读方式"><span className="voice-label">朗读方式</span><span>系统默认语音</span></div>
         <span className="speed-pill">1.0×</span>
       </div>
       {notice && <button className="toast" onClick={() => setNotice("")} aria-label="关闭提示">{notice}<span>×</span></button>}
@@ -1134,6 +1353,7 @@ export default function Home() {
           ["GET", "/v1/auth/me", "获取当前登录身份与隔离边界"],
           ["POST", "/v1/auth/local-register", "本地体验账号注册（仅 localhost）"],
           ["POST", "/v1/auth/local-signin", "本地体验账号登录（仅 localhost）"],
+          ["POST", "/v1/auth/local-bind-phone", "为旧本机账号绑定手机号并保留资料"],
           ["POST", "/v1/auth/local-signout", "退出当前本地体验账号"],
           ["POST", "/v1/assets/uploads", "创建文件上传会话"],
           ["POST", "/v1/documents:import-url", "提交 Crawl4AI 抓取任务"],
@@ -1164,14 +1384,14 @@ export default function Home() {
         </div>
         <form onSubmit={(event) => { event.preventDefault(); void (localAuthMode === "register" ? registerLocal() : signInLocal()); }}>
           {localAuthMode === "register" && <label>显示名称<input value={loginName} onChange={(event) => setLoginName(event.target.value)} maxLength={80} autoComplete="name" required /></label>}
-          <label>邮箱<input type="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} maxLength={254} autoComplete="email" required /></label>
+          <label>手机号<input type="tel" value={loginPhone} onChange={(event) => setLoginPhone(event.target.value)} inputMode="tel" maxLength={20} autoComplete="tel-national" placeholder="请输入中国大陆手机号" required /></label>
           <label>密码<input type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} minLength={8} maxLength={128} autoComplete={localAuthMode === "register" ? "new-password" : "current-password"} required /></label>
           {localAuthMode === "register" && <label>确认密码<input type="password" value={loginPasswordConfirmation} onChange={(event) => setLoginPasswordConfirmation(event.target.value)} minLength={8} maxLength={128} autoComplete="new-password" required /></label>}
           {loginError && <small className="auth-error" role="alert">{loginError}</small>}
           <button className="primary-button" disabled={loginSubmitting}>{loginSubmitting ? "正在处理…" : localAuthMode === "register" ? "注册并进入私有空间" : "登录私有空间"}</button>
         </form>
         <p className="auth-switch">{localAuthMode === "register" ? "已有账号？" : "还没有账号？"}<button onClick={() => { setLocalAuthMode(localAuthMode === "register" ? "signin" : "register"); setLoginError(""); }}>{localAuthMode === "register" ? "去登录" : "立即注册"}</button></p>
-        <small className="auth-hint">本机账号仅用于 localhost 隔离测试；密码经不可逆派生后存储。部署后使用 ChatGPT 登录。</small>
+        <small className="auth-hint">手机号是本机账号的唯一标识；资料、索引、原文件与分享记录均只归属该手机号对应的用户。密码经不可逆派生后存储。</small>
       </> : <>
         <button className="primary-button" onClick={() => { if (signInUrl) window.location.assign(signInUrl); }} disabled={!signInUrl}>使用 ChatGPT 登录</button>
         <small className="auth-hint">平台会验证身份，应用不会保存你的登录密码。</small>
@@ -1193,9 +1413,6 @@ export default function Home() {
     </div>;
   }
 
-  // This is a render helper. Its callbacks access refs only after a user
-  // gesture (file selection / conversion), never while this view is rendered.
-  // eslint-disable-next-line react-hooks/refs
   const mobileCreateView = renderMobileCreate();
 
   return (
@@ -1208,14 +1425,17 @@ export default function Home() {
           <button className={view === "history" ? "active" : ""} onClick={openHistory}><AppIcon name="clock" />处理记录</button>
           <button className={view === "api" ? "active" : ""} onClick={() => setView("api")}><AppIcon name="code" />API 文档</button>
         </nav>
-        <div className="header-actions"><button className="demo-link" onClick={() => { if (!requireLogin()) return; setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button><div className="account-summary"><span className="avatar" aria-hidden="true">{currentUser.display_name.slice(0, 2).toUpperCase()}<i /></span><span className="account-name" title={currentUser.email || currentUser.display_name}>{currentUser.display_name}</span><button className="logout-button" onClick={() => void signOut()}>退出登录</button></div></div>
+        <div className="header-actions"><button className="demo-link" onClick={() => { if (!requireLogin()) return; setReaderDocument(demoDocument); setSourceType("file"); setSelectedFile(null); setProcessingName(demoDocument.title); setView("reader"); }}>体验阅读示例 <span>→</span></button><div className="account-summary"><span className="avatar" aria-hidden="true">{currentUser.display_name.slice(0, 2).toUpperCase()}<i /></span><span className="account-name" title={currentUser.phone || currentUser.email || currentUser.display_name}>{currentUser.display_name}</span><button className="logout-button" onClick={() => void signOut()}>退出登录</button></div></div>
       </header>
       {view === "create" && <><div className="desktop-create-view">{renderCreate()}</div>{mobileCreateView}</>}
-      {view === "processing" && renderProcessing()}
-      {view === "reader" && renderReader()}
-      {view === "library" && renderLibrary()}
-      {view === "history" && renderHistory()}
-      {view === "api" && renderApi()}
+      <div className="desktop-route-view">
+        {view === "processing" && renderProcessing()}
+        {view === "reader" && renderReader()}
+        {view === "library" && renderLibrary()}
+        {view === "history" && renderHistory()}
+        {view === "api" && renderApi()}
+      </div>
+      {view !== "create" && <div className="mobile-route-view">{renderMobileRoute()}</div>}
       {view === "create" && <footer><span>© 2026 声阅</span><span>隐私保护 · 数据安全 · 服务状态</span><span><i /> 全部系统正常</span></footer>}
       {loginOpen && <div className="auth-backdrop" role="presentation">{renderAuthCard()}</div>}
     </div>

@@ -17,6 +17,7 @@ export interface Actor {
   userId: string;
   displayName: string;
   email: string | null;
+  phone: string | null;
   authMode: "platform" | "local";
 }
 
@@ -61,7 +62,7 @@ export function getActor(request: Request): Actor | null {
     const displayName = encodedName && request.headers.get("oai-authenticated-user-full-name-encoding") === "percent-encoded-utf-8"
       ? decodeURIComponent(encodedName)
       : request.headers.get("oai-authenticated-user-email") || "已登录用户";
-    return { userId, tenantId: `workspace:${userId}`, displayName, email: request.headers.get("oai-authenticated-user-email"), authMode: "platform" };
+    return { userId, tenantId: `workspace:${userId}`, displayName, email: request.headers.get("oai-authenticated-user-email"), phone: null, authMode: "platform" };
   }
   return null;
 }
@@ -88,6 +89,7 @@ export async function hashOpaqueToken(value: string): Promise<string> {
 interface LocalActorRow {
   user_id: string;
   email: string;
+  phone: string | null;
   display_name: string;
   expires_at: string;
 }
@@ -98,7 +100,7 @@ export async function getAuthenticatedActor(request: Request, env: Pick<Document
   if (!isLocalRequest(request)) return null;
   const token = readCookie(request, "shengyue_local_session");
   if (!token) return null;
-  const session = await env.DB.prepare("SELECT s.user_id, s.expires_at, u.email, u.display_name FROM local_sessions s JOIN local_users u ON u.id = s.user_id WHERE s.token_hash = ?")
+  const session = await env.DB.prepare("SELECT s.user_id, s.expires_at, u.email, u.phone, u.display_name FROM local_sessions s JOIN local_users u ON u.id = s.user_id WHERE s.token_hash = ?")
     .bind(await hashOpaqueToken(token)).first<LocalActorRow>();
   if (!session) return null;
   if (Date.parse(session.expires_at) <= Date.now()) {
@@ -112,6 +114,7 @@ export async function getAuthenticatedActor(request: Request, env: Pick<Document
     tenantId: session.user_id === "local-developer" ? "local-workspace" : `local:${session.user_id}`,
     displayName: session.display_name,
     email: session.email,
+    phone: session.phone,
     authMode: "local",
   };
 }
@@ -133,7 +136,7 @@ export async function ensureDocumentStore(env: Pick<DocumentEnv, "DB">): Promise
       env.DB.prepare("CREATE TABLE IF NOT EXISTS document_shares (id TEXT PRIMARY KEY NOT NULL, document_id TEXT NOT NULL, tenant_id TEXT NOT NULL, owner_user_id TEXT NOT NULL, token_hash TEXT NOT NULL, allow_download INTEGER NOT NULL DEFAULT 1, expires_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, revoked_at TEXT)"),
       env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_token_hash ON document_shares (token_hash)"),
       env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_shares_document_status ON document_shares (document_id, status, expires_at)"),
-      env.DB.prepare("CREATE TABLE IF NOT EXISTS local_users (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL, display_name TEXT NOT NULL, password_hash TEXT, password_salt TEXT, password_updated_at TEXT, created_at TEXT NOT NULL)"),
+      env.DB.prepare("CREATE TABLE IF NOT EXISTS local_users (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL, phone TEXT, display_name TEXT NOT NULL, password_hash TEXT, password_salt TEXT, password_updated_at TEXT, created_at TEXT NOT NULL)"),
       env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_local_users_email ON local_users (email)"),
       env.DB.prepare("CREATE TABLE IF NOT EXISTS local_sessions (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, token_hash TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)"),
       env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_local_sessions_token_hash ON local_sessions (token_hash)"),
@@ -145,10 +148,12 @@ export async function ensureDocumentStore(env: Pick<DocumentEnv, "DB">): Promise
       ["password_hash", "ALTER TABLE local_users ADD COLUMN password_hash TEXT"],
       ["password_salt", "ALTER TABLE local_users ADD COLUMN password_salt TEXT"],
       ["password_updated_at", "ALTER TABLE local_users ADD COLUMN password_updated_at TEXT"],
+      ["phone", "ALTER TABLE local_users ADD COLUMN phone TEXT"],
     ] as const;
     for (const [column, statement] of additions) {
       if (!existing.has(column)) await env.DB.prepare(statement).run();
     }
+    await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_local_users_phone ON local_users (phone)").run();
   })();
   initializedStores.set(env.DB, initialization);
   return initialization;

@@ -60,6 +60,7 @@ export const documentShares = sqliteTable("document_shares", {
 export const localUsers = sqliteTable("local_users", {
   id: text("id").primaryKey(),
   email: text("email").notNull(),
+  phone: text("phone"),
   displayName: text("display_name").notNull(),
   passwordHash: text("password_hash"),
   passwordSalt: text("password_salt"),
@@ -67,6 +68,7 @@ export const localUsers = sqliteTable("local_users", {
   createdAt: text("created_at").notNull(),
 }, (table) => [
   uniqueIndex("idx_local_users_email").on(table.email),
+  uniqueIndex("idx_local_users_phone").on(table.phone),
 ]);
 
 export const localSessions = sqliteTable("local_sessions", {

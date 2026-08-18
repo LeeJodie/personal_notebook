@@ -8,6 +8,7 @@ const PBKDF2_ITERATIONS = 120_000;
 interface LocalUserRow {
   id: string;
   email: string;
+  phone: string | null;
   display_name: string;
   password_hash: string | null;
   password_salt: string | null;
@@ -31,19 +32,32 @@ function readCookie(request: Request, name: string): string | null {
 }
 
 function serializeActor(actor: NonNullable<Awaited<ReturnType<typeof getAuthenticatedActor>>>) {
-  return { id: actor.userId, tenant_id: actor.tenantId, display_name: actor.displayName, email: actor.email, auth_mode: actor.authMode };
+  return { id: actor.userId, tenant_id: actor.tenantId, display_name: actor.displayName, email: actor.email, phone: actor.phone, auth_mode: actor.authMode };
 }
 
 function sessionCookie(token: string, maxAge: number): string {
   return `shengyue_local_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
 }
 
-function normalizeIdentity(body: { email?: string; display_name?: string }) {
-  const email = body.email?.trim().toLowerCase() || "";
+function normalizePhone(value: unknown): string | null {
+  if (typeof value !== "string" || !/^[+\d\s()-]+$/.test(value)) return null;
+  let phone = value.trim().replace(/[\s()-]/g, "");
+  if (phone.startsWith("0086")) phone = `+86${phone.slice(4)}`;
+  if (/^86\d{11}$/.test(phone)) phone = `+${phone}`;
+  if (/^1[3-9]\d{9}$/.test(phone)) phone = `+86${phone}`;
+  return /^\+861[3-9]\d{9}$/.test(phone) ? phone : null;
+}
+
+function normalizeIdentity(body: { phone?: string; display_name?: string }) {
+  const phone = normalizePhone(body.phone);
   const displayName = body.display_name?.trim().replace(/\s+/g, " ").slice(0, 80) || "";
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return { error: "请输入有效的邮箱地址。" } as const;
+  if (!phone) return { error: "请输入有效的中国大陆手机号。" } as const;
   if (!displayName) return { error: "请输入显示名称。" } as const;
-  return { email, displayName } as const;
+  return { phone, displayName } as const;
+}
+
+function internalEmailForPhone(phone: string): string {
+  return `phone-${phone.replace(/\D/g, "")}@local.shengyue.invalid`;
 }
 
 function normalizePassword(value: unknown): string | null {
@@ -108,7 +122,7 @@ export async function handleAuthRequest(request: Request, env: Pick<DocumentEnv,
 
   if (request.method === "POST" && url.pathname === "/api/auth/local-register") {
     if (!isLocalDevelopmentRequest(request)) return error("本地体验登录只允许在 localhost 使用。", 403, "LOCAL_AUTH_FORBIDDEN");
-    const body = await request.json<{ email?: string; display_name?: string; password?: string }>();
+    const body = await request.json<{ phone?: string; display_name?: string; password?: string }>();
     const identity = normalizeIdentity(body);
     if ("error" in identity) return error(identity.error, 422, "INVALID_IDENTITY");
     const password = normalizePassword(body.password);
@@ -116,19 +130,17 @@ export async function handleAuthRequest(request: Request, env: Pick<DocumentEnv,
     const createdAt = new Date().toISOString();
     const salt = createPasswordSalt();
     const passwordHash = await derivePasswordHash(password, salt);
-    let user = await env.DB.prepare("SELECT id, email, display_name, password_hash, password_salt FROM local_users WHERE email = ?").bind(identity.email).first<LocalUserRow>();
+    let user = await env.DB.prepare("SELECT id, email, phone, display_name, password_hash, password_salt FROM local_users WHERE phone = ?").bind(identity.phone).first<LocalUserRow>();
     if (!user) {
-      // This compatibility id owns the material already imported in localhost
-      // before the local sign-in experience was introduced.
-      const id = identity.email === "local@shengyue.test" ? "local-developer" : crypto.randomUUID();
-      await env.DB.prepare("INSERT INTO local_users (id, email, display_name, password_hash, password_salt, password_updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .bind(id, identity.email, identity.displayName, passwordHash, salt, createdAt, createdAt).run();
-      user = { id, email: identity.email, display_name: identity.displayName, password_hash: passwordHash, password_salt: salt };
+      const id = crypto.randomUUID();
+      const email = internalEmailForPhone(identity.phone);
+      await env.DB.prepare("INSERT INTO local_users (id, email, phone, display_name, password_hash, password_salt, password_updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(id, email, identity.phone, identity.displayName, passwordHash, salt, createdAt, createdAt).run();
+      user = { id, email, phone: identity.phone, display_name: identity.displayName, password_hash: passwordHash, password_salt: salt };
     } else if (user.password_hash || user.password_salt) {
-      return error("该邮箱已注册，请直接登录。", 409, "EMAIL_ALREADY_REGISTERED");
+      return error("该手机号已注册，请直接登录。", 409, "PHONE_ALREADY_REGISTERED");
     } else {
-      // Older localhost accounts did not have credentials. Let the owner set
-      // one through registration, while preserving their existing documents.
+      // Older local accounts without credentials may complete account setup.
       await env.DB.prepare("UPDATE local_users SET display_name = ?, password_hash = ?, password_salt = ?, password_updated_at = ? WHERE id = ?")
         .bind(identity.displayName, passwordHash, salt, createdAt, user.id).run();
       user = { ...user, display_name: identity.displayName, password_hash: passwordHash, password_salt: salt };
@@ -138,15 +150,30 @@ export async function handleAuthRequest(request: Request, env: Pick<DocumentEnv,
 
   if (request.method === "POST" && url.pathname === "/api/auth/local-signin") {
     if (!isLocalDevelopmentRequest(request)) return error("本地体验登录只允许在 localhost 使用。", 403, "LOCAL_AUTH_FORBIDDEN");
-    const body = await request.json<{ email?: string; password?: string }>();
-    const email = body.email?.trim().toLowerCase() || "";
+    const body = await request.json<{ phone?: string; password?: string }>();
+    const phone = normalizePhone(body.phone);
     const password = normalizePassword(body.password);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password) return error("邮箱或密码错误。", 401, "INVALID_CREDENTIALS");
-    const user = await env.DB.prepare("SELECT id, email, display_name, password_hash, password_salt FROM local_users WHERE email = ?").bind(email).first<LocalUserRow>();
-    if (!user?.password_hash || !user.password_salt) return error("邮箱或密码错误。", 401, "INVALID_CREDENTIALS");
+    if (!phone || !password) return error("手机号或密码错误。", 401, "INVALID_CREDENTIALS");
+    const user = await env.DB.prepare("SELECT id, email, phone, display_name, password_hash, password_salt FROM local_users WHERE phone = ?").bind(phone).first<LocalUserRow>();
+    if (!user?.password_hash || !user.password_salt) return error("手机号或密码错误。", 401, "INVALID_CREDENTIALS");
     const passwordHash = await derivePasswordHash(password, user.password_salt);
-    if (!timingSafeEqual(passwordHash, user.password_hash)) return error("邮箱或密码错误。", 401, "INVALID_CREDENTIALS");
+    if (!timingSafeEqual(passwordHash, user.password_hash)) return error("手机号或密码错误。", 401, "INVALID_CREDENTIALS");
     return createLocalSession(request, env, user);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/local-bind-phone") {
+    if (!isLocalDevelopmentRequest(request)) return error("本地体验登录只允许在 localhost 使用。", 403, "LOCAL_AUTH_FORBIDDEN");
+    const actor = await getAuthenticatedActor(request, env);
+    if (!actor || actor.authMode !== "local") return error("请先登录本地账号。", 401, "AUTH_REQUIRED");
+    const body = await request.json<{ phone?: string }>();
+    const phone = normalizePhone(body.phone);
+    if (!phone) return error("请输入有效的中国大陆手机号。", 422, "INVALID_PHONE");
+    if (actor.phone === phone) return json({ authenticated: true, user: serializeActor(actor), local_development: true, sign_in_url: null });
+    const existing = await env.DB.prepare("SELECT id FROM local_users WHERE phone = ?").bind(phone).first<{ id: string }>();
+    if (existing && existing.id !== actor.userId) return error("该手机号已注册，请使用该手机号登录。", 409, "PHONE_ALREADY_REGISTERED");
+    await env.DB.prepare("UPDATE local_users SET phone = ? WHERE id = ?").bind(phone, actor.userId).run();
+    const updatedActor = await getAuthenticatedActor(request, env);
+    return json({ authenticated: true, user: updatedActor ? serializeActor(updatedActor) : null, local_development: true, sign_in_url: null });
   }
 
   if (request.method === "POST" && url.pathname === "/api/auth/local-signout") {
