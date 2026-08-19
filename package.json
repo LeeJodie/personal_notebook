@@ -7,7 +7,9 @@
   },
   "scripts": {
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
+    "dev:crawler": ".venv-crawler/bin/python -m uvicorn main:app --app-dir services/crawler --host 127.0.0.1 --port 8780",
     "dev:processor": ".venv-document-processor/bin/python -m uvicorn main:app --app-dir services/document_processor --host 127.0.0.1 --port 8765",
+    "setup:crawler": "uv venv .venv-crawler && uv pip install --python .venv-crawler/bin/python -r services/crawler/requirements.txt && .venv-crawler/bin/crawl4ai-setup",
     "dev:tts": "services/melotts/.venv/bin/python -m uvicorn server:app --app-dir services/melotts --host 127.0.0.1 --port 9876",
     "setup:tts-model": "services/melotts/.venv/bin/python services/melotts/download_model.py",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",

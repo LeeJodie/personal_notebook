@@ -15,6 +15,12 @@ interface ReaderSection {
   paragraphs: string[];
 }
 
+interface ReaderDisplayMetadataItem {
+  label: string;
+  value: string;
+  href?: string | null;
+}
+
 interface ReaderDocument {
   documentId?: string;
   title: string;
@@ -25,6 +31,7 @@ interface ReaderDocument {
   wordCount: number;
   engine: "demo" | "crawl4ai" | "server-html-extractor" | "document-processor";
   sections: ReaderSection[];
+  displayMetadata?: ReaderDisplayMetadataItem[];
 }
 
 interface StoredDocument {
@@ -179,6 +186,13 @@ function escapeHtml(value: string): string {
   })[character] || character);
 }
 
+function SourceMetadata({ items }: { items?: ReaderDisplayMetadataItem[] }) {
+  if (!items?.length) return null;
+  return <dl className="source-metadata" aria-label="来源文件信息">
+    {items.map((item, index) => <div key={`${item.label}-${index}`}><dt>{item.label}</dt><dd>{item.href ? <a href={item.href} target="_blank" rel="noreferrer">{item.value}</a> : item.value}</dd></div>)}
+  </dl>;
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("create");
   const [viewHistory, setViewHistory] = useState<View[]>([]);
@@ -246,7 +260,7 @@ export default function Home() {
   const processingSessionRef = useRef(0);
 
   const articleText = useMemo(
-    () => [readerDocument.title, readerDocument.description, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])]
+    () => [readerDocument.title, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])]
       .join("。")
       // Source links are useful to display but have no useful spoken form.
       .replace(/https?:\/\/[^\s<>]+/gi, "。")
@@ -862,7 +876,8 @@ export default function Home() {
       return;
     }
     const sections = readerDocument.sections.map((section) => `<section><p class="eyebrow">${escapeHtml(section.eyebrow)}</p><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(readerDocument.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p><h1>${escapeHtml(readerDocument.title)}</h1><p class="deck">${escapeHtml(readerDocument.description)}</p>${sections}</main><div class="player"><button id="play">▶ 开始播放</button></div><script>const text=document.querySelector('main').innerText,b=document.querySelector('#play');b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
+    const displayMetadata = (readerDocument.displayMetadata || []).map((item) => `<div><dt>${escapeHtml(item.label)}</dt><dd>${item.href ? `<a href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">${escapeHtml(item.value)}</a>` : escapeHtml(item.value)}</dd></div>`).join("");
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(readerDocument.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.source-metadata{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:28px 0;padding:16px;border:1px solid #e1e2dc;border-radius:12px;background:#fafaf7}.source-metadata div{min-width:0}.source-metadata dt{color:#737970;font-size:12px}.source-metadata dd{margin:2px 0 0;color:#30342e;font-size:14px;word-break:break-word}.source-metadata a{color:#b54732}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p>${displayMetadata ? `<dl class="source-metadata" aria-label="文件信息">${displayMetadata}</dl>` : ""}<div data-speech-content><h1>${escapeHtml(readerDocument.title)}</h1><p class="deck">${escapeHtml(readerDocument.description)}</p>${sections}</div></main><div class="player"><button id="play">▶ 开始播放</button></div><script>const text=document.querySelector('[data-speech-content]').innerText,b=document.querySelector('#play');b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const href = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -1144,6 +1159,7 @@ export default function Home() {
         <p className="mobile-reader-eyebrow">{readerDocument.siteName} · {readerDocument.engine === "demo" ? "阅读示例" : "已生成阅读页"}</p>
         <h1>{readerDocument.title}</h1>
         <p className="mobile-reader-deck">{readerDocument.description}</p>
+        <SourceMetadata items={readerDocument.displayMetadata} />
         {readerDocument.sections.map((section, index) => <section key={section.id} id={section.id}><p className="mobile-reader-section-index">{String(index + 1).padStart(2, "0")} / 文档内容</p><h2>{section.title}</h2>{section.paragraphs.map((paragraph, paragraphIndex) => <p key={`${section.id}-${paragraphIndex}`}>{paragraph}</p>)}</section>)}
         <p className="mobile-reader-end">— 已读完全文 —</p>
       </article>
@@ -1279,6 +1295,7 @@ export default function Home() {
         <div className="article-meta"><span>{readerDocument.siteName}</span><span>·</span><span>{readerDocument.engine === "demo" ? "阅读示例" : readerDocument.engine === "document-processor" ? "已解析上传文件" : "实时网页抓取"}</span>{readerDocument.sourceUrl && <><span>·</span><a href={readerDocument.sourceUrl} target="_blank" rel="noreferrer">查看原网页 ↗</a></>}</div>
         <h1>{readerDocument.title}</h1>
         <p className="article-deck">{readerDocument.description}</p>
+        <SourceMetadata items={readerDocument.displayMetadata} />
         <div className="article-rule" />
         {readerDocument.sections.map((section) => <section key={section.id} id={section.id}><p className="section-eyebrow">{section.eyebrow}</p><h2>{section.title}</h2>{section.paragraphs.map((paragraph, index) => <p key={`${section.id}-${index}`}>{paragraph}</p>)}</section>)}
         <div className="article-end"><span /> 文章结束 <span /></div>

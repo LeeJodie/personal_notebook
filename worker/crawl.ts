@@ -4,6 +4,9 @@ export type CrawlDocument = ReaderDocument;
 
 interface CrawlEnv {
   CUSTOMER_HTTP_CRAWLER?: Fetcher;
+  // Local-only bridge to the real Crawl4AI service. Hosted deployments must
+  // use the private binding above rather than exposing this URL publicly.
+  LOCAL_CRAWLER_URL?: string;
 }
 
 const MAX_HTML_BYTES = 3 * 1024 * 1024;
@@ -58,6 +61,36 @@ function metaContent(html: string, names: string[]): string {
   return "";
 }
 
+function elementContents(html: string, openingTag: RegExp): string | null {
+  const opening = openingTag.exec(html);
+  if (!opening || opening.index === undefined) return null;
+  const openEnd = html.indexOf(">", opening.index);
+  if (openEnd < 0) return null;
+
+  // A non-greedy regexp stops at the first nested </div>, which is exactly
+  // what makes the Beijing policy body appear truncated. Walk matching div
+  // tags so nested editor markup remains part of the selected root.
+  const divTags = /<\/?div\b[^>]*>/gi;
+  divTags.lastIndex = openEnd + 1;
+  let depth = 1;
+  for (let tag = divTags.exec(html); tag; tag = divTags.exec(html)) {
+    if (/^<\/div\b/i.test(tag[0])) depth -= 1;
+    else depth += 1;
+    if (depth === 0) return html.slice(openEnd + 1, tag.index);
+  }
+  return null;
+}
+
+function extractBeijingPolicyBody(html: string, sourceUrl: string): string | null {
+  const hostname = new URL(sourceUrl).hostname.toLowerCase();
+  if (hostname !== "www.beijing.gov.cn" && !hostname.endsWith(".beijing.gov.cn")) return null;
+
+  const mainText = elementContents(html, /<div\b[^>]*\bid=["']mainText["'][^>]*>/i);
+  if (!mainText) return null;
+  const view = elementContents(mainText, /<div\b[^>]*\bclass=["'][^"']*\bview\b[^"']*["'][^>]*>/i);
+  return view && plainText(view).length > 300 ? view : mainText;
+}
+
 function chooseContentRoot(html: string): string {
   const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1];
   if (article && plainText(article).length > 300) return article;
@@ -84,13 +117,17 @@ function uniqueId(title: string, index: number): string {
 }
 
 export function extractDocumentFromHtml(html: string, sourceUrl: string): CrawlDocument {
-  const title = plainText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "") || new URL(sourceUrl).hostname;
+  const title = metaContent(html, ["ArticleTitle", "article:title", "og:title"])
+    || plainText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "")
+    || new URL(sourceUrl).hostname;
   const description = metaContent(html, ["description", "og:description"]);
   const siteName = metaContent(html, ["SiteName", "og:site_name"]) || new URL(sourceUrl).hostname;
-  let content = chooseContentRoot(html)
+  const scopedPolicyBody = extractBeijingPolicyBody(html, sourceUrl);
+  let content = (scopedPolicyBody || chooseContentRoot(html))
     .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<(script|style|noscript|template|svg|canvas|form|footer|nav)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
     .replace(/<(h[1-3])\b[^>]*>([\s\S]*?)<\/\1>/gi, (_, tag: string, inner: string) => `\n@@H${tag.slice(1)}@@ ${plainText(inner)}\n`)
+    .replace(/<p\b[^>]*>\s*<strong\b[^>]*>([\s\S]*?)<\/strong>\s*<\/p>/gi, (_, inner: string) => `\n@@H2@@ ${plainText(inner)}\n`)
     .replace(/<(p|li|dt|dd|blockquote|figcaption|td|th)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_, _tag: string, inner: string) => `\n${plainText(inner)}\n`)
     .replace(/<br\s*\/?\s*>/gi, "\n")
     .replace(/<[^>]+>/g, " ");
@@ -104,12 +141,14 @@ export function extractDocumentFromHtml(html: string, sourceUrl: string): CrawlD
   const seenHeadings = new Set<string>();
   const seenParagraphs = new Set<string>();
   const sections: Array<{ title: string; paragraphs: string[] }> = [];
-  let current: { title: string; paragraphs: string[] } | null = null;
+  // A site-specific body root is already free of menus and controls, so it
+  // does not need a semantic h1 before body paragraphs can be retained.
+  let current: { title: string; paragraphs: string[] } | null = scopedPolicyBody ? { title: "网页正文", paragraphs: [] } : null;
   let totalChars = 0;
 
   const pushCurrent = () => {
     if (!current || current.paragraphs.length === 0) return;
-    if (sections.length < 14) sections.push(current);
+    if (sections.length < 50) sections.push(current);
   };
 
   for (const rawLine of rawLines) {
@@ -132,9 +171,9 @@ export function extractDocumentFromHtml(html: string, sourceUrl: string): CrawlD
     seenParagraphs.add(line);
     current.paragraphs.push(line);
     totalChars += line.length;
-    if (current.paragraphs.length >= 10) {
+    if (current.paragraphs.length >= 50) {
       pushCurrent();
-      current = null;
+      current = { title: "网页正文", paragraphs: [] };
     }
   }
   pushCurrent();
@@ -145,7 +184,7 @@ export function extractDocumentFromHtml(html: string, sourceUrl: string): CrawlD
       .map(plainText)
       .filter((line) => isUsefulLine(line) && line !== title)
       .filter((line, index, all) => all.indexOf(line) === index)
-      .slice(0, 30);
+      .slice(0, 100);
     if (fallback.length) sections.push({ title: "网页正文", paragraphs: fallback });
   }
 
@@ -240,18 +279,38 @@ export async function handleCrawlRequest(request: Request, env: CrawlEnv): Promi
 export async function crawlUrl(value: unknown, env: CrawlEnv): Promise<CrawlDocument> {
   const target = normalizeUrl(value);
   // Production path: a private HTTP binding points to the containerized
-  // Crawl4AI service in services/crawler. The public Sites preview keeps a
-  // server-side HTML extractor fallback so it never substitutes demo copy.
+  // Crawl4AI service in services/crawler. Local development uses the same
+  // service through a loopback URL. Do not silently substitute the simpler
+  // extractor once Crawl4AI has been configured: a partial result is worse
+  // than a clear service error for a saved reader document.
   if (env.CUSTOMER_HTTP_CRAWLER) {
     const upstream = await env.CUSTOMER_HTTP_CRAWLER.fetch("http://crawler.internal/v1/crawl", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ url: target.toString() }),
     });
-    if (upstream.ok) {
-      const data = await upstream.json<Record<string, unknown>>();
-      return { ...data, engine: "crawl4ai" } as CrawlDocument;
+    if (!upstream.ok) throw new Error(`Crawl4AI 服务返回 ${upstream.status}。`);
+    const data = await upstream.json<Record<string, unknown>>();
+    return { ...data, engine: "crawl4ai" } as CrawlDocument;
+  }
+  if (env.LOCAL_CRAWLER_URL) {
+    const endpoint = new URL("/v1/crawl", env.LOCAL_CRAWLER_URL).toString();
+    let upstream: Response;
+    try {
+      upstream = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: target.toString() }),
+      });
+    } catch {
+      throw new Error("本地 Crawl4AI 服务不可用。请先运行 npm run dev:crawler。");
     }
+    if (!upstream.ok) {
+      const failure = await upstream.json<{ detail?: string }>().catch(() => null);
+      throw new Error(failure?.detail || `本地 Crawl4AI 服务返回 ${upstream.status}。`);
+    }
+    const data = await upstream.json<Record<string, unknown>>();
+    return { ...data, engine: "crawl4ai" } as CrawlDocument;
   }
   const { html, finalUrl } = await fetchPublicHtml(target);
   return extractDocumentFromHtml(html, finalUrl);

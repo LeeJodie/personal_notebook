@@ -10,6 +10,12 @@ interface ReaderSection {
   paragraphs: string[];
 }
 
+interface ReaderDisplayMetadataItem {
+  label: string;
+  value: string;
+  href?: string | null;
+}
+
 interface SharedReaderDocument {
   title: string;
   description: string;
@@ -19,6 +25,7 @@ interface SharedReaderDocument {
   wordCount: number;
   engine: "crawl4ai" | "server-html-extractor" | "document-processor";
   sections: ReaderSection[];
+  displayMetadata?: ReaderDisplayMetadataItem[];
 }
 
 export default function SharedReader({ shareId }: { shareId: string }) {
@@ -30,7 +37,7 @@ export default function SharedReader({ shareId }: { shareId: string }) {
   const speechSessionRef = useRef(0);
 
   const articleText = useMemo(
-    () => document ? [document.title, document.description, ...document.sections.flatMap((section) => [section.title, ...section.paragraphs])].join("。") : "",
+    () => document ? [document.title, ...document.sections.flatMap((section) => [section.title, ...section.paragraphs])].join("。") : "",
     [document],
   );
 
@@ -93,6 +100,7 @@ export default function SharedReader({ shareId }: { shareId: string }) {
         <p className="shared-reader-meta">{document.siteName} · 由声阅转换</p>
         <h1>{document.title}</h1>
         <p className="shared-reader-deck">{document.description}</p>
+        {document.displayMetadata?.length ? <dl className="source-metadata" aria-label="来源文件信息">{document.displayMetadata.map((item, index) => <div key={`${item.label}-${index}`}><dt>{item.label}</dt><dd>{item.href ? <a href={item.href} target="_blank" rel="noreferrer">{item.value}</a> : item.value}</dd></div>)}</dl> : null}
         {document.sections.map((section) => <section key={section.id}><p className="shared-section-eyebrow">{section.eyebrow}</p><h2>{section.title}</h2>{section.paragraphs.map((paragraph, index) => <p key={`${section.id}-${index}`}>{paragraph}</p>)}</section>)}
       </article>
       <div className="shared-reader-player"><button onClick={playSpeech}>{speaking ? "Ⅱ 停止朗读" : "▶ 开始朗读"}</button><span className="shared-default-voice">系统默认语音</span>{allowDownload && <button className="shared-download" onClick={downloadH5}>↓ 下载 H5</button>}</div>

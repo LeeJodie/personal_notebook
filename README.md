@@ -24,6 +24,13 @@ uv pip install --python .venv-document-processor/bin/python -r services/document
 npm run dev:processor
 ```
 
+网页链接通过真实 Crawl4AI 服务抓取；首次使用时，在另一个终端准备并启动它：
+
+```bash
+npm run setup:crawler
+npm run dev:crawler
+```
+
 私有 MeloTTS（CPU 低延迟）首次准备并启动：
 
 ```bash

@@ -46,6 +46,34 @@ test("URL imports use the persistent document API and dynamic reader data", asyn
   assert.match(documents, /document_chunks/);
 });
 
+test("Crawl4AI keeps policy bodies complete and separates visible source facts from narration", async () => {
+  const [crawler, crawlWorker, page, sharePage, reader] = await Promise.all([
+    readFile(new URL("services/crawler/main.py", root), "utf8"),
+    readFile(new URL("worker/crawl.ts", root), "utf8"),
+    readFile(new URL("app/page.tsx", root), "utf8"),
+    readFile(new URL("app/share/[shareId]/shared-reader.tsx", root), "utf8"),
+    readFile(new URL("worker/reader.ts", root), "utf8"),
+  ]);
+  assert.match(crawler, /content_selector = content_selector_for\(target\)/);
+  assert.match(crawler, /crawler_run_config\(content_selector\)/);
+  assert.match(crawler, /#mainText \.view/);
+  assert.match(crawler, /getattr\(markdown_result, "raw_markdown"/);
+  assert.match(crawler, /extract_display_metadata/);
+  assert.match(crawler, /displayMetadata=display_metadata/);
+  assert.match(crawler, /is_section_heading/);
+  assert.match(crawlWorker, /LOCAL_CRAWLER_URL/);
+  assert.match(crawlWorker, /npm run dev:crawler/);
+  assert.match(crawlWorker, /extractBeijingPolicyBody/);
+  assert.match(crawlWorker, /elementContents/);
+  assert.match(crawlWorker, /scopedPolicyBody \? \{ title: "网页正文", paragraphs: \[\] \} : null/);
+  assert.match(crawlWorker, /<strong\\b/);
+  assert.match(page, /<SourceMetadata items=\{readerDocument\.displayMetadata\}/);
+  assert.match(sharePage, /document\.displayMetadata\?\.length/);
+  assert.match(reader, /data-speech-content/);
+  assert.doesNotMatch(page, /\[readerDocument\.title, readerDocument\.description, \.\.\.readerDocument\.sections/);
+  assert.doesNotMatch(sharePage, /\[document\.title, document\.description, \.\.\.document\.sections/);
+});
+
 test("reader exposes H5 download, default MeloTTS playback and a revocable share link", async () => {
   const [page, shareWorker, sharePage, ttsWorker, meloTts] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
