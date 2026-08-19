@@ -75,17 +75,18 @@ test("Crawl4AI keeps policy bodies complete and separates visible source facts f
 });
 
 test("reader exposes H5 download, default MeloTTS playback and a revocable share link", async () => {
-  const [page, shareWorker, sharePage, ttsWorker, meloTts] = await Promise.all([
+  const [page, shareWorker, sharePage, ttsWorker, meloTts, reader] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("worker/share.ts", root), "utf8"),
     readFile(new URL("app/share/[shareId]/shared-reader.tsx", root), "utf8"),
     readFile(new URL("worker/tts.ts", root), "utf8"),
     readFile(new URL("services/melotts/server.py", root), "utf8"),
+    readFile(new URL("worker/reader.ts", root), "utf8"),
   ]);
   assert.match(page, /一键下载 H5/);
   assert.match(page, /生成分享链接/);
-  assert.match(page, /useState<"browser" \| "melotts">\("melotts"\)/);
-  assert.match(page, /MeloTTS · 中文自然女声/);
+  assert.match(page, /useState<"unavailable" \| "melotts">\("unavailable"\)/);
+  assert.match(page, /MeloTTS · 私有中文自然女声/);
   assert.match(page, /\/v1\/documents\/\$\{readerDocument\.documentId\}\/shares/);
   assert.match(shareWorker, /handleShareRequest/);
   assert.match(shareWorker, /tokenHash/);
@@ -93,17 +94,21 @@ test("reader exposes H5 download, default MeloTTS playback and a revocable share
   assert.match(shareWorker, /SHARE_DOWNLOAD_FORBIDDEN/);
   assert.match(sharePage, /下载 H5/);
   assert.match(sharePage, /\/v1\/public\/shares\//);
-  assert.match(page, /speakFromOffset/);
-  assert.match(page, /系统默认语音/);
+  assert.doesNotMatch(page, /const speakFromOffset/);
+  assert.match(page, /MeloTTS 私有语音/);
   assert.match(sharePage, /shared-default-voice/);
   assert.doesNotMatch(page, /const changeVoice/);
   assert.doesNotMatch(sharePage, /const changeVoice/);
   assert.match(page, /privateTtsVoices/);
   assert.match(page, /MeloTTS/);
+  assert.doesNotMatch(page, /mobile-reader-section-index/);
+  assert.doesNotMatch(page, /<p className="section-eyebrow">\{section\.eyebrow\}/);
+  assert.doesNotMatch(reader, /<p class="eyebrow">\$\{escapeHtml\(section\.eyebrow\)\}/);
   assert.match(ttsWorker, /CUSTOMER_HTTP_TTS/);
   assert.match(ttsWorker, /\/v1\/synthesize/);
   assert.match(meloTts, /tts_to_file/);
   assert.match(meloTts, /spk2id/);
+  assert.doesNotMatch(meloTts, /vars\(getattr\(melo_tts\.hps\.data, "spk2id"/);
   assert.match(meloTts, /MeloTTS-Chinese/);
 });
 

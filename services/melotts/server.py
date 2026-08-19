@@ -45,7 +45,7 @@ class SynthesisRequest(BaseModel):
 def voices_from_model() -> list[dict[str, str]]:
     if melo_tts is None:
         return []
-    speaker_ids = vars(getattr(melo_tts.hps.data, "spk2id", {}))
+    speaker_ids = getattr(melo_tts.hps.data, "spk2id", {})
     return [
         {
             "id": speaker_id,

@@ -205,10 +205,10 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState(0);
   const [processingName, setProcessingName] = useState("");
-  const [voiceName, setVoiceName] = useState("");
-  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [privateTtsVoices, setPrivateTtsVoices] = useState<PrivateTtsVoice[]>([]);
-  const [ttsProvider, setTtsProvider] = useState<"browser" | "melotts">("melotts");
+  // The workbench must never present a browser voice as private TTS. MeloTTS
+  // is selected only after its internal service returns an available voice.
+  const [ttsProvider, setTtsProvider] = useState<"unavailable" | "melotts">("unavailable");
   const [speaking, setSpeaking] = useState(false);
   const [ttsPlaybackState, setTtsPlaybackState] = useState<TtsPlaybackState>("idle");
   const [speechProgress, setSpeechProgress] = useState(0);
@@ -248,7 +248,6 @@ export default function Home() {
   const [loginError, setLoginError] = useState("");
   const [loginSubmitting, setLoginSubmitting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const privateProgressFrameRef = useRef<number | null>(null);
@@ -276,19 +275,6 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (!("speechSynthesis" in window)) return;
-    const loadVoices = () => {
-      const available = window.speechSynthesis.getVoices();
-      const chineseFirst = [...available].sort((a, b) => Number(b.lang.startsWith("zh")) - Number(a.lang.startsWith("zh")));
-      setVoices(chineseFirst);
-      if (!voiceName && chineseFirst.length) setVoiceName(chineseFirst[0].name);
-    };
-    loadVoices();
-    window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
-    return () => window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
-  }, [voiceName]);
-
-  useEffect(() => {
     if (view !== "processing" || sourceType !== "url" || !isCrawling) return;
     const timer = window.setInterval(() => {
       setProgress((current) => {
@@ -299,7 +285,6 @@ export default function Home() {
   }, [view, sourceType, isCrawling]);
 
   useEffect(() => () => {
-    window.speechSynthesis?.cancel();
     cancelMeloRequests();
     audioSourceRef.current?.stop();
     audioContextRef.current?.close();
@@ -332,13 +317,13 @@ export default function Home() {
       .then(({ response, result }) => {
         if (!active) return;
         if (!response.ok || !Array.isArray(result.items) || !result.items.length) {
-          setTtsProvider("browser");
+          setTtsProvider("unavailable");
           return;
         }
         setPrivateTtsVoices(result.items);
         setTtsProvider("melotts");
       })
-      .catch(() => { if (active) setTtsProvider("browser"); });
+      .catch(() => { if (active) setTtsProvider("unavailable"); });
     return () => { active = false; };
   }, [currentUser?.id]);
 
@@ -662,52 +647,12 @@ export default function Home() {
     speechSessionRef.current += 1;
     cancelMeloRequests();
     clearPrivateAudio();
-    window.speechSynthesis?.cancel();
-    utteranceRef.current = null;
     setSpeaking(false);
     setTtsPlaybackState("idle");
     if (resetProgress) {
       speechOffsetRef.current = 0;
       setSpeechProgress(0);
     }
-  };
-
-  const speakFromOffset = (requestedOffset: number, selectedVoice = voiceName) => {
-    if (!("speechSynthesis" in window) || !articleText) {
-      setNotice("当前浏览器不支持语音播放。");
-      return;
-    }
-    const offset = requestedOffset >= articleText.length ? 0 : Math.max(0, requestedOffset);
-    const session = speechSessionRef.current + 1;
-    speechSessionRef.current = session;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(articleText.slice(offset));
-    utterance.lang = "zh-CN";
-    utterance.rate = 1;
-    utterance.voice = voices.find((voice) => voice.name === selectedVoice) || null;
-    utterance.onboundary = (event) => {
-      if (speechSessionRef.current !== session) return;
-      const absoluteOffset = Math.min(articleText.length, offset + event.charIndex);
-      speechOffsetRef.current = absoluteOffset;
-      setSpeechProgress(Math.min(100, Math.round((absoluteOffset / articleText.length) * 100)));
-    };
-    utterance.onend = () => {
-      if (speechSessionRef.current !== session) return;
-      speechOffsetRef.current = articleText.length;
-      setSpeaking(false);
-      setTtsPlaybackState("idle");
-      setSpeechProgress(100);
-    };
-    utterance.onerror = () => {
-      if (speechSessionRef.current === session) {
-        setSpeaking(false);
-        setTtsPlaybackState("idle");
-      }
-    };
-    utteranceRef.current = utterance;
-    window.speechSynthesis.speak(utterance);
-    setSpeaking(true);
-    setTtsPlaybackState("playing");
   };
 
   const fetchMeloSegment = async (offset: number, preferFastStart: boolean, selectedVoice: string, session: number, audioContext: AudioContext): Promise<MeloAudioSegment | null> => {
@@ -840,7 +785,7 @@ export default function Home() {
       setNotice("MeloTTS 正在准备默认音色，请稍后再试。");
       return;
     }
-    speakFromOffset(speechProgress >= 100 ? 0 : speechOffsetRef.current);
+    setNotice("私有 MeloTTS 服务未连接，无法开始朗读。请先启动并绑定私有 MeloTTS 服务。");
   };
 
   const handleReaderBack = () => {
@@ -875,7 +820,7 @@ export default function Home() {
       setNotice("正在下载已保存的 H5 阅读页。");
       return;
     }
-    const sections = readerDocument.sections.map((section) => `<section><p class="eyebrow">${escapeHtml(section.eyebrow)}</p><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
+    const sections = readerDocument.sections.map((section) => `<section><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
     const displayMetadata = (readerDocument.displayMetadata || []).map((item) => `<div><dt>${escapeHtml(item.label)}</dt><dd>${item.href ? `<a href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">${escapeHtml(item.value)}</a>` : escapeHtml(item.value)}</dd></div>`).join("");
     const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(readerDocument.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.source-metadata{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:28px 0;padding:16px;border:1px solid #e1e2dc;border-radius:12px;background:#fafaf7}.source-metadata div{min-width:0}.source-metadata dt{color:#737970;font-size:12px}.source-metadata dd{margin:2px 0 0;color:#30342e;font-size:14px;word-break:break-word}.source-metadata a{color:#b54732}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p>${displayMetadata ? `<dl class="source-metadata" aria-label="文件信息">${displayMetadata}</dl>` : ""}<div data-speech-content><h1>${escapeHtml(readerDocument.title)}</h1><p class="deck">${escapeHtml(readerDocument.description)}</p>${sections}</div></main><div class="player"><button id="play">▶ 开始播放</button></div><script>const text=document.querySelector('[data-speech-content]').innerText,b=document.querySelector('#play');b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
@@ -1151,7 +1096,7 @@ export default function Home() {
   const renderMobileReader = () => {
     const documentType = selectedFile?.name.split(".").pop()?.toUpperCase() || (readerDocument.sourceUrl ? "网页" : "资料");
     const duration = Math.max(1, Math.ceil(readerDocument.wordCount / 350));
-    const ttsLabel = ttsProvider === "melotts" ? privateTtsVoices.length ? "MeloTTS · 中文自然女声" : "MeloTTS 正在准备" : "浏览器语音 · 自动回退";
+    const ttsLabel = ttsProvider === "melotts" ? "MeloTTS · 私有中文自然女声" : "私有 MeloTTS 未连接";
     return <main className="mobile-route-page mobile-reader-screen">
       <header className="mobile-route-header"><button onClick={handleReaderBack} aria-label="返回上一页">‹</button><strong>听读</strong><button onClick={() => setMobileReaderMenuOpen(true)} aria-label="更多操作">•••</button></header>
       <div className="mobile-reader-summary"><span className={`mobile-reader-type ${documentType.toLowerCase()}`}>{documentType}</span><div><strong>{readerDocument.title}</strong><small>{readerDocument.sections.length} 章 · 约 {duration} 分钟 · 已保存</small></div></div>
@@ -1160,7 +1105,7 @@ export default function Home() {
         <h1>{readerDocument.title}</h1>
         <p className="mobile-reader-deck">{readerDocument.description}</p>
         <SourceMetadata items={readerDocument.displayMetadata} />
-        {readerDocument.sections.map((section, index) => <section key={section.id} id={section.id}><p className="mobile-reader-section-index">{String(index + 1).padStart(2, "0")} / 文档内容</p><h2>{section.title}</h2>{section.paragraphs.map((paragraph, paragraphIndex) => <p key={`${section.id}-${paragraphIndex}`}>{paragraph}</p>)}</section>)}
+        {readerDocument.sections.map((section) => <section key={section.id} id={section.id}><h2>{section.title}</h2>{section.paragraphs.map((paragraph, paragraphIndex) => <p key={`${section.id}-${paragraphIndex}`}>{paragraph}</p>)}</section>)}
         <p className="mobile-reader-end">— 已读完全文 —</p>
       </article>
       <div className="mobile-reader-dock"><button className="mobile-play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}>{speaking ? "Ⅱ" : "▶"}</button><div><strong>{speaking ? "正在朗读" : "准备收听"}</strong><small>{ttsLabel} · {Math.round(speechProgress)}%</small></div><button className="mobile-dock-menu" onClick={() => setMobileReaderMenuOpen(true)} aria-label="打开操作菜单">⋯</button></div>
@@ -1250,7 +1195,7 @@ export default function Home() {
 
       <section className="trust-row" aria-label="核心优势">
         <div><AppIcon name="lock" /><span><strong>私有存储</strong><small>用户级知识库隔离</small></span></div>
-        <div><span className="mini-wave"><i /><i /><i /></span><span><strong>即时 TTS</strong><small>默认系统语音，即点即听</small></span></div>
+        <div><span className="mini-wave"><i /><i /><i /></span><span><strong>私有 MeloTTS</strong><small>音频仅在自有服务生成</small></span></div>
         <div><AppIcon name="download" /><span><strong>双份导出</strong><small>H5 阅读页 + 原文件</small></span></div>
       </section>
     </main>
@@ -1297,7 +1242,7 @@ export default function Home() {
         <p className="article-deck">{readerDocument.description}</p>
         <SourceMetadata items={readerDocument.displayMetadata} />
         <div className="article-rule" />
-        {readerDocument.sections.map((section) => <section key={section.id} id={section.id}><p className="section-eyebrow">{section.eyebrow}</p><h2>{section.title}</h2>{section.paragraphs.map((paragraph, index) => <p key={`${section.id}-${index}`}>{paragraph}</p>)}</section>)}
+        {readerDocument.sections.map((section) => <section key={section.id} id={section.id}><h2>{section.title}</h2>{section.paragraphs.map((paragraph, index) => <p key={`${section.id}-${index}`}>{paragraph}</p>)}</section>)}
         <div className="article-end"><span /> 文章结束 <span /></div>
       </article>
       <div className="reader-actions">
@@ -1323,8 +1268,8 @@ export default function Home() {
       </div>
       <div className="tts-player">
         <button className="play-button" onClick={playSpeech} aria-label={speaking ? (isMeloSynthesizing ? "取消生成" : "暂停播放") : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
-        <div className="track-info"><div><strong>{isMeloSynthesizing ? "正在生成音频 · " : speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "melotts" ? "MeloTTS" : "浏览器语音"}</strong><span>{isMeloSynthesizing ? "MeloTTS 正在合成音频，点击暂停可取消" : readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className={`audio-progress${isMeloSynthesizing ? " is-synthesizing" : ""}`}><span style={{ width: `${speechProgress}%` }} /></div></div>
-        <div className="voice-select" aria-label="朗读方式"><span className="voice-label">朗读方式</span><span>系统默认语音</span></div>
+        <div className="track-info"><div><strong>{isMeloSynthesizing ? "正在生成音频 · " : speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "melotts" ? "MeloTTS" : "私有 TTS 未连接"}</strong><span>{isMeloSynthesizing ? "MeloTTS 正在合成音频，点击暂停可取消" : readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className={`audio-progress${isMeloSynthesizing ? " is-synthesizing" : ""}`}><span style={{ width: `${speechProgress}%` }} /></div></div>
+        <div className="voice-select" aria-label="朗读方式"><span className="voice-label">朗读方式</span><span>{ttsProvider === "melotts" ? "MeloTTS 私有语音" : "私有服务未连接"}</span></div>
         <span className="speed-pill">1.0×</span>
       </div>
       {notice && <button className="toast" onClick={() => setNotice("")} aria-label="关闭提示">{notice}<span>×</span></button>}

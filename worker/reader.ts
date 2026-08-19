@@ -34,7 +34,7 @@ export function escapeHtml(value: string): string {
 }
 
 export function createH5(document: ReaderDocument): string {
-  const sections = document.sections.map((section) => `<section><p class="eyebrow">${escapeHtml(section.eyebrow)}</p><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
+  const sections = document.sections.map((section) => `<section><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
   const displayMetadata = (document.displayMetadata || []).map((item) => {
     const value = item.href ? `<a href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">${escapeHtml(item.value)}</a>` : escapeHtml(item.value);
     return `<div><dt>${escapeHtml(item.label)}</dt><dd>${value}</dd></div>`;
