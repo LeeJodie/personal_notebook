@@ -5,6 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8080
 
 WORKDIR /app
+ENV CRAWL4_AI_BASE_DIRECTORY=/tmp
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && crawl4ai-setup

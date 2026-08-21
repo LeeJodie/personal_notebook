@@ -1,12 +1,14 @@
 "use client";
 
-import { DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { DragEvent, type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { readTtsAudioCache, ttsAudioCacheRequest, writeTtsAudioCache } from "./lib/tts-audio-cache";
 
 type View = "create" | "processing" | "reader" | "library" | "history" | "api";
 type SourceType = "file" | "url";
 type MobileEntryMode = "file" | "url" | "clipboard";
 type LocalAuthMode = "signin" | "register";
 type TtsPlaybackState = "idle" | "synthesizing" | "playing";
+type TtsMode = "local" | "online";
 
 interface ReaderSection {
   id: string;
@@ -76,13 +78,15 @@ interface MeloAudioSegment {
   offset: number;
   text: string;
   audioBuffer: AudioBuffer;
+  cached: boolean;
 }
 
 const supportedExtensions = ["DOCX", "MD", "TXT", "XLSX", "PDF"];
-// CPU TTS returns a complete WAV rather than a stream. Start with the first
-// complete short sentence, then prefetch semantically bounded medium segments.
-const MELOTTS_INITIAL_TARGET_CHARS = 42;
-const MELOTTS_INITIAL_MAX_CHARS = 86;
+// CPU TTS returns a complete WAV rather than a stream. Keep the headline and
+// opening body together, so a short title cannot end before the next segment
+// has had time to arrive.
+const MELOTTS_INITIAL_TARGET_CHARS = 88;
+const MELOTTS_INITIAL_MAX_CHARS = 150;
 const MELOTTS_SEGMENT_TARGET_CHARS = 110;
 const MELOTTS_SEGMENT_MAX_CHARS = 180;
 const MELOTTS_SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
@@ -113,9 +117,12 @@ function nextMeloTextSegment(text: string, offset: number, preferFastStart: bool
   let end: number | null = null;
 
   if (preferFastStart) {
-    // The first complete phrase beats a larger batch: it minimizes the time
-    // before the listener hears the private voice.
-    end = findBoundary(text, minEnd, maxEnd, sentenceEnd) || findBoundary(text, minEnd, maxEnd, clauseEnd);
+    // Do not stop after a title alone. Prefer the first natural boundary after
+    // the target, then fall back to any earlier safe punctuation point.
+    end = findBoundary(text, targetEnd, maxEnd, sentenceEnd)
+      || findBoundary(text, targetEnd, maxEnd, clauseEnd)
+      || findBoundary(text, minEnd, maxEnd, sentenceEnd)
+      || findBoundary(text, minEnd, maxEnd, clauseEnd);
   } else {
     // Prefer a sentence ending after the target length. A long sentence falls
     // back to a clause break; a hard cut is only for unpunctuated OCR content.
@@ -124,6 +131,24 @@ function nextMeloTextSegment(text: string, offset: number, preferFastStart: bool
       || findBoundary(text, minEnd, maxEnd, `${sentenceEnd}${clauseEnd}`, true);
   }
   return { offset, text: text.slice(offset, end || maxEnd) };
+}
+
+function readerDescription(description: string, sections: Array<{ paragraphs: string[] }>): string {
+  const compactDescription = description.replace(/\s+/g, "");
+  const compactBody = sections.flatMap((section) => section.paragraphs).join("").replace(/\s+/g, "");
+  const descriptionPrefix = compactDescription.replace(/[。！？，；,.!?]+$/g, "");
+  return descriptionPrefix.length >= 12 && compactBody.includes(descriptionPrefix) ? "" : description;
+}
+
+function readerSpeechText(document: ReaderDocument): string {
+  const genericTitles = new Set(["网页正文", "文档内容", "正文"]);
+  return [document.title, ...document.sections.flatMap((section) => [genericTitles.has(section.title.trim()) ? "" : section.title, ...section.paragraphs])]
+    .filter(Boolean)
+    .join("。")
+    // Source links and visual metadata are useful to display, but have no
+    // useful spoken form and must never become a separate narration segment.
+    .replace(/https?:\/\/[^\s<>]+/gi, "。")
+    .replace(/\s+/g, " ");
 }
 
 const demoDocument: ReaderDocument = {
@@ -181,6 +206,13 @@ function AppIcon({ name }: { name: "plus" | "book" | "clock" | "code" | "arrow" 
   return <span className={`app-icon icon-${name}`} aria-hidden="true">{map[name]}</span>;
 }
 
+function MobileImportIcon({ kind }: { kind: "file" | "link" | "clipboard" }) {
+  const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 2.25, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  if (kind === "link") return <svg className="mobile-upload-icon" viewBox="0 0 48 48" aria-hidden="true"><path {...stroke} d="M18.5 29.5 14 34a7 7 0 0 1-10-10l7-7a7 7 0 0 1 10 0" /><path {...stroke} d="m29.5 18.5 4.5-4.5a7 7 0 1 1 10 10l-7 7a7 7 0 0 1-10 0" /><path {...stroke} d="m17 31 14-14" /></svg>;
+  if (kind === "clipboard") return <svg className="mobile-upload-icon" viewBox="0 0 48 48" aria-hidden="true"><path {...stroke} d="M15 10h-2.5A3.5 3.5 0 0 0 9 13.5v25A3.5 3.5 0 0 0 12.5 42h23a3.5 3.5 0 0 0 3.5-3.5v-25A3.5 3.5 0 0 0 35.5 10H33" /><path {...stroke} d="M18 9a6 6 0 0 1 12 0h2.5a1.5 1.5 0 0 1 1.5 1.5v4A1.5 1.5 0 0 1 32.5 16h-17a1.5 1.5 0 0 1-1.5-1.5v-4A1.5 1.5 0 0 1 15.5 9H18Z" /><path {...stroke} d="M16 25h16M16 32h11" /></svg>;
+  return <svg className="mobile-upload-icon" viewBox="0 0 48 48" aria-hidden="true"><path {...stroke} d="M13 5.5h14L35.5 14v25.5A3.5 3.5 0 0 1 32 43H13a3.5 3.5 0 0 1-3.5-3.5V9A3.5 3.5 0 0 1 13 5.5Z" /><path {...stroke} d="M27 5.5V14h8.5" /><path {...stroke} d="M24 34V21M19.5 25.5 24 21l4.5 4.5" /></svg>;
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -208,13 +240,17 @@ export default function Home() {
   const [processingName, setProcessingName] = useState("");
   const [privateTtsVoices, setPrivateTtsVoices] = useState<PrivateTtsVoice[]>([]);
   const [selectedTtsVoice, setSelectedTtsVoice] = useState("");
+  const [ttsMode, setTtsMode] = useState<TtsMode>("local");
   const [ttsSpeed, setTtsSpeed] = useState<number>(1);
   // The workbench must never present a browser voice as private TTS. MeloTTS
   // is selected only after its internal service returns an available voice.
-  const [ttsProvider, setTtsProvider] = useState<"unavailable" | "melotts">("unavailable");
+  const [ttsProvider, setTtsProvider] = useState<"unavailable" | "melotts" | "edge-tts">("unavailable");
+  const [ttsVoicesLoading, setTtsVoicesLoading] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [ttsPlaybackState, setTtsPlaybackState] = useState<TtsPlaybackState>("idle");
+  const [ttsCacheStatus, setTtsCacheStatus] = useState<"idle" | "hit" | "stored">("idle");
   const [speechProgress, setSpeechProgress] = useState(0);
+  const [speechSeekPreview, setSpeechSeekPreview] = useState<number | null>(null);
   const [notice, setNotice] = useState("");
   const [readerDocument, setReaderDocument] = useState<ReaderDocument>(demoDocument);
   const [isCrawling, setIsCrawling] = useState(false);
@@ -255,26 +291,28 @@ export default function Home() {
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const privateProgressFrameRef = useRef<number | null>(null);
   const meloRequestControllersRef = useRef(new Set<AbortController>());
-  const meloPrefetchRef = useRef<{ session: number; offset: number; voiceId: string; speed: number; promise: Promise<MeloAudioSegment | null> } | null>(null);
+  const meloPrefetchRef = useRef(new Map<number, { session: number; voiceId: string; speed: number; promise: Promise<MeloAudioSegment | null> }>());
+  const meloAudioMemoryCacheRef = useRef(new Map<string, AudioBuffer>());
   const speechOffsetRef = useRef(0);
   const speechSessionRef = useRef(0);
+  const speechSeekPreviewRef = useRef<number | null>(null);
   const crawlAbortRef = useRef<AbortController | null>(null);
   const processingSessionRef = useRef(0);
 
   const articleText = useMemo(
-    () => [readerDocument.title, ...readerDocument.sections.flatMap((section) => [section.title, ...section.paragraphs])]
-      .join("。")
-      // Source links are useful to display but have no useful spoken form.
-      .replace(/https?:\/\/[^\s<>]+/gi, "。")
-      .replace(/\s+/g, " "),
+    () => readerSpeechText(readerDocument),
     [readerDocument],
   );
-  const isMeloSynthesizing = speaking && ttsProvider === "melotts" && ttsPlaybackState === "synthesizing";
+  const visibleDescription = useMemo(
+    () => readerDescription(readerDocument.description, readerDocument.sections),
+    [readerDocument.description, readerDocument.sections],
+  );
+  const isMeloSynthesizing = speaking && ttsProvider !== "unavailable" && ttsPlaybackState === "synthesizing";
 
   const cancelMeloRequests = () => {
     for (const controller of meloRequestControllersRef.current) controller.abort();
     meloRequestControllersRef.current.clear();
-    meloPrefetchRef.current = null;
+    meloPrefetchRef.current.clear();
   };
 
   useEffect(() => {
@@ -313,10 +351,14 @@ export default function Home() {
 
   useEffect(() => {
     const ttsUserId = currentUser?.id;
-    if (!ttsUserId) return;
+    if (!ttsUserId) {
+      setTtsVoicesLoading(false);
+      return;
+    }
     let active = true;
-    fetch("/v1/tts/voices", { cache: "no-store" })
-      .then(async (response) => ({ response, result: await response.json() as { items?: PrivateTtsVoice[] } }))
+    setTtsVoicesLoading(true);
+    fetch(`/v1/tts/voices?mode=${ttsMode}`, { cache: "no-store" })
+      .then(async (response) => ({ response, result: await response.json() as { provider?: "melotts" | "edge-tts"; items?: PrivateTtsVoice[] } }))
       .then(({ response, result }) => {
         if (!active) return;
         if (!response.ok || !Array.isArray(result.items) || !result.items.length) {
@@ -325,11 +367,13 @@ export default function Home() {
         }
         setPrivateTtsVoices(result.items);
         setSelectedTtsVoice((current) => result.items?.some((voice) => voice.id === current) ? current : result.items?.[0]?.id || "");
-        setTtsProvider("melotts");
+        setTtsProvider(result.provider === "edge-tts" ? "edge-tts" : "melotts");
+        setNotice("");
       })
-      .catch(() => { if (active) setTtsProvider("unavailable"); });
+      .catch(() => { if (active) setTtsProvider("unavailable"); })
+      .finally(() => { if (active) setTtsVoicesLoading(false); });
     return () => { active = false; };
-  }, [currentUser?.id]);
+  }, [currentUser?.id, ttsMode]);
 
   useEffect(() => {
     if (!currentUser?.id) return;
@@ -576,7 +620,10 @@ export default function Home() {
       });
       const result = await response.json() as { document?: { id?: string; error_message?: string }; reader?: Omit<ReaderDocument, "documentId"> | null; message?: string };
       if (!response.ok) throw new Error(result.document?.error_message || result.message || `抓取服务返回 ${response.status}`);
-      if (!result.document?.id || !result.reader || !result.reader.title || !result.reader.description || !Array.isArray(result.reader.sections) || result.reader.sections.length === 0) {
+      // Description is optional. The crawler intentionally clears it when a
+      // page meta summary duplicates the first body paragraph; requiring it
+      // here incorrectly rejects otherwise complete policy documents.
+      if (!result.document?.id || !result.reader || !result.reader.title || !Array.isArray(result.reader.sections) || result.reader.sections.length === 0) {
         throw new Error("抓取成功，但结果中没有可阅读正文。");
       }
       if (processingSessionRef.current !== processingSession) return;
@@ -660,24 +707,62 @@ export default function Home() {
     }
   };
 
+  const previewSpeechSeek = (value: number) => {
+    const nextValue = Math.max(0, Math.min(100, Math.round(value)));
+    speechSeekPreviewRef.current = nextValue;
+    setSpeechSeekPreview(nextValue);
+  };
+
+  const commitSpeechSeek = () => {
+    const requestedProgress = speechSeekPreviewRef.current;
+    if (requestedProgress === null || !articleText.length) return;
+    speechSeekPreviewRef.current = null;
+    setSpeechSeekPreview(null);
+    const offset = Math.min(articleText.length, Math.round((requestedProgress / 100) * articleText.length));
+    const shouldResume = speaking;
+    speechOffsetRef.current = offset;
+    setSpeechProgress(requestedProgress);
+    if (shouldResume) speakWithMeloTts(offset);
+  };
+
   const fetchMeloSegment = async (offset: number, preferFastStart: boolean, selectedVoice: string, speed: number, session: number, audioContext: AudioContext): Promise<MeloAudioSegment | null> => {
     const segment = nextMeloTextSegment(articleText, offset, preferFastStart);
     if (!segment?.text || speechSessionRef.current !== session) return null;
+    const cacheRequest = await ttsAudioCacheRequest({
+      scope: `${currentUser?.id || "anonymous"}:${readerDocument.documentId || readerDocument.sourceUrl || readerDocument.title}`,
+      mode: ttsMode,
+      voiceId: selectedVoice,
+      speed,
+      text: segment.text,
+    });
+    if (speechSessionRef.current !== session) return null;
+    const inMemoryAudio = meloAudioMemoryCacheRef.current.get(cacheRequest.url);
+    if (inMemoryAudio) return { offset, text: segment.text, audioBuffer: inMemoryAudio, cached: true };
+    const cachedAudio = await readTtsAudioCache(cacheRequest);
+    if (cachedAudio) {
+      const audioBuffer = await audioContext.decodeAudioData(cachedAudio);
+      meloAudioMemoryCacheRef.current.set(cacheRequest.url, audioBuffer);
+      return speechSessionRef.current === session ? { offset, text: segment.text, audioBuffer, cached: true } : null;
+    }
+    if (speechSessionRef.current !== session) return null;
     const controller = new AbortController();
     meloRequestControllersRef.current.add(controller);
     try {
       const response = await fetch("/v1/tts/synthesize", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: segment.text, voice_id: selectedVoice, speed }),
+        body: JSON.stringify({ text: segment.text, voice_id: selectedVoice, speed, mode: ttsMode }),
         signal: controller.signal,
       });
       if (!response.ok) {
         const result = await response.json().catch(() => ({})) as { message?: string };
-        throw new Error(result.message || "MeloTTS 合成失败。");
+        throw new Error(result.message || `${ttsMode === "online" ? "EdgeTTS" : "MeloTTS"} 合成失败。`);
       }
-      const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
-      return speechSessionRef.current === session ? { offset, text: segment.text, audioBuffer } : null;
+      const audio = await response.arrayBuffer();
+      void writeTtsAudioCache(cacheRequest, audio.slice(0), response.headers.get("content-type") || (ttsMode === "online" ? "audio/mpeg" : "audio/wav"));
+      const audioBuffer = await audioContext.decodeAudioData(audio);
+      meloAudioMemoryCacheRef.current.set(cacheRequest.url, audioBuffer);
+      return speechSessionRef.current === session ? { offset, text: segment.text, audioBuffer, cached: false } : null;
     } finally {
       meloRequestControllersRef.current.delete(controller);
     }
@@ -685,13 +770,25 @@ export default function Home() {
 
   const prefetchMeloSegment = (offset: number, selectedVoice: string, speed: number, session: number, audioContext: AudioContext) => {
     if (offset >= articleText.length || speechSessionRef.current !== session) return;
-    const existing = meloPrefetchRef.current;
-    if (existing?.session === session && existing.offset === offset && existing.voiceId === selectedVoice && existing.speed === speed) return;
+    const existing = meloPrefetchRef.current.get(offset);
+    if (existing?.session === session && existing.voiceId === selectedVoice && existing.speed === speed) return;
     const promise = fetchMeloSegment(offset, false, selectedVoice, speed, session, audioContext);
     // The promise is deliberately awaited at the segment boundary. Attach a
     // handler now so an aborted background request never becomes unhandled.
     void promise.catch(() => undefined);
-    meloPrefetchRef.current = { session, offset, voiceId: selectedVoice, speed, promise };
+    meloPrefetchRef.current.set(offset, { session, voiceId: selectedVoice, speed, promise });
+  };
+
+  const prefetchMeloAhead = (offset: number, selectedVoice: string, speed: number, session: number, audioContext: AudioContext) => {
+    let nextOffset = offset;
+    // Keeping two semantic fragments ahead makes the locked CPU synthesizer
+    // work while the listener is still hearing the current fragment.
+    for (let index = 0; index < 2 && nextOffset < articleText.length; index += 1) {
+      prefetchMeloSegment(nextOffset, selectedVoice, speed, session, audioContext);
+      const next = nextMeloTextSegment(articleText, nextOffset, false);
+      if (!next) break;
+      nextOffset += next.text.length;
+    }
   };
 
   const playMeloSegment = async (offset: number, selectedVoice: string, speed: number, session: number, audioContext: AudioContext, prepared?: MeloAudioSegment | null, preferFastStart = false) => {
@@ -708,6 +805,7 @@ export default function Home() {
         );
       }
       if (!nextSegment || speechSessionRef.current !== session) return;
+      setTtsCacheStatus(nextSegment.cached ? "hit" : "stored");
       clearPrivateAudio();
       const source = audioContext.createBufferSource();
       source.buffer = nextSegment.audioBuffer;
@@ -717,7 +815,7 @@ export default function Home() {
       const followingOffset = offset + nextSegment.text.length;
       // Start the next CPU synthesis as soon as audio begins. It will normally
       // finish while the listener is hearing the current segment.
-      prefetchMeloSegment(followingOffset, selectedVoice, speed, session, audioContext);
+      prefetchMeloAhead(followingOffset, selectedVoice, speed, session, audioContext);
       const updateProgress = () => {
         if (speechSessionRef.current !== session || audioSourceRef.current !== source || nextSegment.audioBuffer.duration <= 0) return;
         const elapsed = Math.min(nextSegment.audioBuffer.duration, Math.max(0, audioContext.currentTime - startedAt));
@@ -738,9 +836,9 @@ export default function Home() {
           setTtsPlaybackState("idle");
           return;
         }
-        const prefetched = meloPrefetchRef.current;
-        meloPrefetchRef.current = null;
-        if (prefetched?.session === session && prefetched.offset === followingOffset && prefetched.voiceId === selectedVoice && prefetched.speed === speed) {
+        const prefetched = meloPrefetchRef.current.get(followingOffset);
+        meloPrefetchRef.current.delete(followingOffset);
+        if (prefetched?.session === session && prefetched.voiceId === selectedVoice && prefetched.speed === speed) {
           void prefetched.promise.then((audio) => playMeloSegment(followingOffset, selectedVoice, speed, session, audioContext, audio)).catch(() => playMeloSegment(followingOffset, selectedVoice, speed, session, audioContext));
           return;
         }
@@ -753,13 +851,13 @@ export default function Home() {
       if (speechSessionRef.current !== session) return;
       setSpeaking(false);
       setTtsPlaybackState("idle");
-      setNotice(error instanceof Error ? error.message : "MeloTTS 服务暂不可用。");
+      setNotice(error instanceof Error ? error.message : `${ttsMode === "online" ? "EdgeTTS" : "MeloTTS"} 服务暂不可用。`);
     }
   };
 
   const speakWithMeloTts = (requestedOffset: number, selectedVoice = selectedTtsVoice || privateTtsVoices[0]?.id || "", speed = ttsSpeed) => {
     if (!articleText || !selectedVoice) {
-      setNotice("MeloTTS 音色尚未就绪，请稍后再试。");
+      setNotice("音色尚未就绪，请稍后再试。");
       return;
     }
     const audioContext = preparePrivateAudio();
@@ -772,6 +870,9 @@ export default function Home() {
     window.speechSynthesis?.cancel();
     speechOffsetRef.current = offset;
     setSpeechProgress(Math.round((offset / articleText.length) * 100));
+    speechSeekPreviewRef.current = null;
+    setSpeechSeekPreview(null);
+    setTtsCacheStatus("idle");
     setSpeaking(true);
     setTtsPlaybackState("synthesizing");
     void playMeloSegment(offset, selectedVoice, speed, session, audioContext, undefined, true);
@@ -783,6 +884,17 @@ export default function Home() {
     const shouldResume = speaking;
     setSelectedTtsVoice(voiceId);
     if (shouldResume) speakWithMeloTts(offset, voiceId, ttsSpeed);
+  };
+
+  const selectTtsMode = (mode: TtsMode) => {
+    if (mode === ttsMode) return;
+    stopSpeech(false);
+    setNotice("");
+    setPrivateTtsVoices([]);
+    setSelectedTtsVoice("");
+    setTtsProvider("unavailable");
+    setTtsVoicesLoading(true);
+    setTtsMode(mode);
   };
 
   const selectMeloSpeed = (speed: number) => {
@@ -798,15 +910,19 @@ export default function Home() {
       stopSpeech(false);
       return;
     }
-    if (ttsProvider === "melotts") {
+    if (ttsVoicesLoading) {
+      setNotice(`${ttsMode === "online" ? "EdgeTTS" : "MeloTTS"} 正在加载音色，请稍候再开始朗读。`);
+      return;
+    }
+    if (ttsProvider !== "unavailable") {
       if (privateTtsVoices.length) {
         speakWithMeloTts(speechProgress >= 100 ? 0 : speechOffsetRef.current);
         return;
       }
-      setNotice("MeloTTS 正在准备默认音色，请稍后再试。");
+      setNotice(`${ttsMode === "online" ? "EdgeTTS" : "MeloTTS"} 正在准备默认音色，请稍后再试。`);
       return;
     }
-    setNotice("私有 MeloTTS 服务未连接，无法开始朗读。请先启动并绑定私有 MeloTTS 服务。");
+    setNotice(`${ttsMode === "online" ? "联网 EdgeTTS" : "本地 MeloTTS"} 服务未连接，无法开始朗读。请确认服务已启动后重试。`);
   };
 
   const handleReaderBack = () => {
@@ -843,7 +959,7 @@ export default function Home() {
     }
     const sections = readerDocument.sections.map((section) => `<section><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</section>`).join("");
     const displayMetadata = (readerDocument.displayMetadata || []).map((item) => `<div><dt>${escapeHtml(item.label)}</dt><dd>${item.href ? `<a href="${escapeHtml(item.href)}" target="_blank" rel="noreferrer">${escapeHtml(item.value)}</a>` : escapeHtml(item.value)}</dd></div>`).join("");
-    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(readerDocument.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.source-metadata{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:28px 0;padding:16px;border:1px solid #e1e2dc;border-radius:12px;background:#fafaf7}.source-metadata div{min-width:0}.source-metadata dt{color:#737970;font-size:12px}.source-metadata dd{margin:2px 0 0;color:#30342e;font-size:14px;word-break:break-word}.source-metadata a{color:#b54732}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p>${displayMetadata ? `<dl class="source-metadata" aria-label="文件信息">${displayMetadata}</dl>` : ""}<div data-speech-content><h1>${escapeHtml(readerDocument.title)}</h1><p class="deck">${escapeHtml(readerDocument.description)}</p>${sections}</div></main><div class="player"><button id="play">▶ 开始播放</button></div><script>const text=document.querySelector('[data-speech-content]').innerText,b=document.querySelector('#play');b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(readerDocument.title)}</title><style>body{margin:0;background:#f5f5f1;color:#20221d;font:17px/1.9 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:72px 24px 140px}h1{font-size:42px;line-height:1.2}h2{font-size:28px;line-height:1.35;margin-top:56px}.deck{color:#6f756b;font-size:19px}.eyebrow{color:#e25d3f;font-size:12px;font-weight:700;letter-spacing:.12em}.source-metadata{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:28px 0;padding:16px;border:1px solid #e1e2dc;border-radius:12px;background:#fafaf7}.source-metadata div{min-width:0}.source-metadata dt{color:#737970;font-size:12px}.source-metadata dd{margin:2px 0 0;color:#30342e;font-size:14px;word-break:break-word}.source-metadata a{color:#b54732}.player{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;gap:12px;align-items:center;background:#20221d;color:white;padding:12px 18px;border-radius:18px;box-shadow:0 12px 40px #0003}.player button{border:0;border-radius:10px;padding:10px 14px}</style></head><body><main><p class="eyebrow">声阅 · 智能阅读</p>${displayMetadata ? `<dl class="source-metadata" aria-label="文件信息">${displayMetadata}</dl>` : ""}<div data-speech-content><h1>${escapeHtml(readerDocument.title)}</h1>${visibleDescription ? `<p class="deck">${escapeHtml(visibleDescription)}</p>` : ""}${sections}</div></main><div class="player"><button id="play">▶ 开始播放</button></div><script>const text=document.querySelector('[data-speech-content]').innerText,b=document.querySelector('#play');b.onclick=()=>{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='zh-CN';speechSynthesis.speak(u);};</script></body></html>`;
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const href = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -1072,13 +1188,13 @@ export default function Home() {
       <section className="mobile-import-card" aria-label="上传文档或网页">
         <input className="mobile-file-input" id="mobile-file-input" type="file" accept=".docx,.md,.txt,.xlsx,.pdf" onChange={(event) => acceptFile(event.target.files?.[0])} />
         {mobileEntryMode === "file" ? <div className={`mobile-drop-zone ${selectedFile ? "is-ready" : ""} ${dragging ? "dragging" : ""}`} role="button" tabIndex={0} aria-label="选择要上传的文档" onClick={() => document.getElementById("mobile-file-input")?.click()} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); document.getElementById("mobile-file-input")?.click(); } }} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
-          {selectedFile ? <><span className="mobile-file-icon">{selectedFile.name.split(".").pop()?.toUpperCase()}</span><strong>{selectedFile.name}</strong><small>{(selectedFile.size / 1024 / 1024).toFixed(1)} MB · 已选择</small><span className="mobile-file-trigger">更换文件</span></> : <><span className="mobile-upload-icon">▯</span><strong>上传文档</strong><small>点击选择或拖入 DOCX、PDF、XLSX、MD、TXT</small></>}
+          {selectedFile ? <><span className="mobile-file-icon">{selectedFile.name.split(".").pop()?.toUpperCase()}</span><strong>{selectedFile.name}</strong><small>{(selectedFile.size / 1024 / 1024).toFixed(1)} MB · 已选择</small><span className="mobile-file-trigger">更换文件</span></> : <><MobileImportIcon kind="file" /><strong>上传文档</strong><small className="mobile-import-helper">点击选择或拖入文件</small><span className="mobile-upload-formats">DOCX · PDF · XLSX · MD · TXT</span></>}
         </div> : mobileEntryMode === "clipboard" ? <div className="mobile-clipboard-zone">
-          <span className="mobile-upload-icon">▣</span><strong>从剪贴板导入</strong>
+          <MobileImportIcon kind="clipboard" /><strong>从剪贴板导入</strong>
           <textarea aria-label="剪贴板内容" value={clipboardContent} onChange={(event) => { setClipboardContent(event.target.value); setUrlError(""); }} placeholder="点击读取剪贴板，或在这里粘贴文字 / 网页链接" />
           <div className="mobile-url-actions"><button className="mobile-clipboard-read" onClick={() => void pasteFromClipboard()}>读取剪贴板</button><button className="mobile-url-next" onClick={startMobileProcessing} disabled={isUploading || isCrawling}>{isUploading || isCrawling ? "正在处理…" : "下一步，开始收听 →"}</button></div>
           <small>{urlError || (!clipboardContent.trim() ? "支持网页链接或任意文字；文字将按 TXT 文档导入" : clipboardIsWebAddress ? "已识别为网页链接，将提取网页正文" : `已识别 ${clipboardContent.trim().length.toLocaleString()} 字，将按 TXT 文档导入`)}</small>
-        </div> : <div className="mobile-url-zone"><span className="mobile-upload-icon">↗</span><strong>粘贴网页链接</strong><input value={url} onChange={(event) => { setUrl(event.target.value); setUrlError(""); }} onKeyDown={(event) => event.key === "Enter" && startMobileProcessing()} placeholder="https://example.com/article" /><div className="mobile-url-actions"><button className="mobile-url-next" onClick={startMobileProcessing} disabled={isCrawling}>{isCrawling ? "正在抓取…" : "下一步，开始收听 →"}</button></div><small>{urlError || "粘贴完成后点击下一步，生成可听阅读页"}</small></div>}
+        </div> : <div className="mobile-url-zone"><MobileImportIcon kind="link" /><strong>粘贴网页链接</strong><input value={url} onChange={(event) => { setUrl(event.target.value); setUrlError(""); }} onKeyDown={(event) => event.key === "Enter" && startMobileProcessing()} placeholder="https://example.com/article" /><div className="mobile-url-actions"><button className="mobile-url-next" onClick={startMobileProcessing} disabled={isCrawling}>{isCrawling ? "正在抓取…" : "下一步，开始收听 →"}</button></div><small>{urlError || "粘贴完成后点击下一步，生成可听阅读页"}</small></div>}
         <div className="mobile-source-switch" role="tablist">
           <button className={mobileEntryMode === "file" ? "active" : ""} onClick={() => chooseMobileEntry("file")} role="tab" aria-selected={mobileEntryMode === "file"}>▤ 文件</button>
           <button className={mobileEntryMode === "url" ? "active" : ""} onClick={() => chooseMobileEntry("url")} role="tab" aria-selected={mobileEntryMode === "url"}>⌁ 网页</button>
@@ -1106,14 +1222,14 @@ export default function Home() {
     if (!mobileAccountOpen) return null;
     const phone = currentUser?.phone;
     const maskedPhone = phone ? `${phone.slice(0, 3)} **** ${phone.slice(-4)}` : "已通过平台账户登录";
-    return <div className="mobile-sheet-backdrop" role="presentation"><section className="mobile-action-sheet mobile-account-sheet" role="dialog" aria-modal="true" aria-label="账户设置"><div className="mobile-sheet-handle" /><div className="mobile-account-summary"><strong>{currentUser?.display_name}</strong><small>{maskedPhone}</small><span>资料、索引与分享记录仅归属当前账户</span></div>{currentUser?.auth_mode === "local" && !phone && <div className="mobile-phone-bind"><label>绑定手机号<input type="tel" value={phoneToBind} onChange={(event) => { setPhoneToBind(event.target.value); setPhoneBindingError(""); }} inputMode="tel" autoComplete="tel-national" placeholder="请输入中国大陆手机号" /></label><button onClick={() => void bindCurrentAccountPhone()} disabled={phoneBinding}>{phoneBinding ? "正在绑定…" : "绑定并保留现有资料"}</button>{phoneBindingError && <small role="alert">{phoneBindingError}</small>}</div>}<button onClick={() => { setMobileAccountOpen(false); void signOut(); }}><span>⇥</span>退出登录</button><button className="mobile-action-cancel" onClick={() => setMobileAccountOpen(false)}>取消</button></section></div>;
+    return <div className="mobile-sheet-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setMobileAccountOpen(false); }}><section className="mobile-action-sheet mobile-account-sheet" role="dialog" aria-modal="true" aria-label="账户设置"><button type="button" className="mobile-sheet-handle" onClick={() => setMobileAccountOpen(false)} aria-label="收起面板" /><div className="mobile-account-summary"><strong>{currentUser?.display_name}</strong><small>{maskedPhone}</small><span>资料、索引与分享记录仅归属当前账户</span></div>{currentUser?.auth_mode === "local" && !phone && <div className="mobile-phone-bind"><label>绑定手机号<input type="tel" value={phoneToBind} onChange={(event) => { setPhoneToBind(event.target.value); setPhoneBindingError(""); }} inputMode="tel" autoComplete="tel-national" placeholder="请输入中国大陆手机号" /></label><button onClick={() => void bindCurrentAccountPhone()} disabled={phoneBinding}>{phoneBinding ? "正在绑定…" : "绑定并保留现有资料"}</button>{phoneBindingError && <small role="alert">{phoneBindingError}</small>}</div>}<button onClick={() => { setMobileAccountOpen(false); void signOut(); }}><span>⇥</span>退出登录</button><button className="mobile-action-cancel" onClick={() => setMobileAccountOpen(false)}>取消</button></section></div>;
   };
 
   const renderMobileShareSheet = () => {
     if (!sharePanelOpen) return null;
-    return <div className="mobile-sheet-backdrop" role="presentation">
+    return <div className="mobile-sheet-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setSharePanelOpen(false); }}>
       <section className="mobile-share-sheet" role="dialog" aria-modal="true" aria-label="转发阅读页">
-        <div className="mobile-sheet-handle" />
+        <button type="button" className="mobile-sheet-handle" onClick={() => setSharePanelOpen(false)} aria-label="收起面板" />
         <header><div><p>转发阅读页</p><small>链接仅供阅读，可随时关闭</small></div><button onClick={() => setSharePanelOpen(false)} aria-label="关闭分享面板">×</button></header>
         {shareLink ? <>
           <div className="mobile-share-link"><input readOnly value={shareLink} aria-label="分享链接" /><button onClick={() => void copyToClipboard(shareLink, "分享链接已复制。")}><AppIcon name="copy" />复制</button></div>
@@ -1132,25 +1248,28 @@ export default function Home() {
   const renderMobileReader = () => {
     const documentType = selectedFile?.name.split(".").pop()?.toUpperCase() || (readerDocument.sourceUrl ? "网页" : "资料");
     const duration = Math.max(1, Math.ceil(readerDocument.wordCount / 350));
-    const selectedVoiceLabel = privateTtsVoices.find((voice) => voice.id === selectedTtsVoice)?.label || "MeloTTS 音色准备中";
-    const ttsLabel = ttsProvider === "melotts" ? `MeloTTS · ${selectedVoiceLabel}` : "私有 MeloTTS 未连接";
+    const selectedVoiceLabel = privateTtsVoices.find((voice) => voice.id === selectedTtsVoice)?.label || "音色准备中";
+    const ttsModeLabel = ttsMode === "local" ? "本地 MeloTTS" : "联网 EdgeTTS";
+    const ttsLabel = ttsVoicesLoading ? `${ttsModeLabel} · 正在加载音色` : ttsProvider !== "unavailable" ? `${ttsModeLabel} · ${selectedVoiceLabel}` : `${ttsModeLabel} 未连接`;
+    const ttsCacheLabel = ttsCacheStatus === "hit" ? " · 缓存播放" : ttsCacheStatus === "stored" ? " · 已缓存" : "";
     return <main className="mobile-route-page mobile-reader-screen">
       <header className="mobile-route-header"><button onClick={handleReaderBack} aria-label="返回上一页">‹</button><strong>听读</strong><button onClick={() => setMobileReaderMenuOpen(true)} aria-label="更多操作">•••</button></header>
       <div className="mobile-reader-summary"><span className={`mobile-reader-type ${documentType.toLowerCase()}`}>{documentType}</span><div><strong>{readerDocument.title}</strong><small>{readerDocument.sections.length} 章 · 约 {duration} 分钟 · 已保存</small></div></div>
       <article className="mobile-reader-article">
         <p className="mobile-reader-eyebrow">{readerDocument.siteName} · {readerDocument.engine === "demo" ? "阅读示例" : "已生成阅读页"}</p>
         <h1>{readerDocument.title}</h1>
-        <p className="mobile-reader-deck">{readerDocument.description}</p>
+        {visibleDescription ? <p className="mobile-reader-deck">{visibleDescription}</p> : null}
         <SourceMetadata items={readerDocument.displayMetadata} />
         {readerDocument.sections.map((section) => <section key={section.id} id={section.id}><h2>{section.title}</h2>{section.paragraphs.map((paragraph, paragraphIndex) => <p key={`${section.id}-${paragraphIndex}`}>{paragraph}</p>)}</section>)}
         <p className="mobile-reader-end">— 已读完全文 —</p>
       </article>
-      <div className="mobile-reader-dock"><button className="mobile-play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}>{speaking ? "Ⅱ" : "▶"}</button><div><strong>{speaking ? "正在朗读" : "准备收听"}</strong><small>{ttsLabel} · {Math.round(speechProgress)}%</small></div><button className="mobile-dock-menu" onClick={() => setMobileReaderMenuOpen(true)} aria-label="打开操作菜单">⋯</button></div>
-      {mobileReaderMenuOpen && <div className="mobile-sheet-backdrop" role="presentation"><section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="阅读操作"><div className="mobile-sheet-handle" />
-        <div className="mobile-tts-settings" aria-label="MeloTTS 朗读设置">
-          <label>音色<select value={selectedTtsVoice} onChange={(event) => selectMeloVoice(event.target.value)} disabled={ttsProvider !== "melotts" || !privateTtsVoices.length}>{privateTtsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}</select></label>
+      <div className="mobile-reader-dock"><button className="mobile-play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}>{speaking ? "Ⅱ" : "▶"}</button><div className="mobile-dock-track"><div><strong>{speaking ? "正在朗读" : "准备收听"}</strong><small>{ttsLabel} · {Math.round(speechSeekPreview ?? speechProgress)}%{ttsCacheLabel}</small></div><input className={`mobile-dock-progress${isMeloSynthesizing ? " is-synthesizing" : ""}`} type="range" min="0" max="100" step="1" value={Math.round(speechSeekPreview ?? speechProgress)} style={{ "--progress": `${speechSeekPreview ?? speechProgress}%` } as CSSProperties} aria-label="拖动定位朗读进度" onChange={(event) => previewSpeechSeek(Number(event.target.value))} onPointerUp={commitSpeechSeek} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commitSpeechSeek(); }} onBlur={commitSpeechSeek} disabled={!articleText.length} /></div><button className="mobile-dock-menu" onClick={() => setMobileReaderMenuOpen(true)} aria-label="打开操作菜单">⋯</button></div>
+      {mobileReaderMenuOpen && <div className="mobile-sheet-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setMobileReaderMenuOpen(false); }}><section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="阅读操作"><button type="button" className="mobile-sheet-handle" onClick={() => setMobileReaderMenuOpen(false)} aria-label="收起面板" />
+        <div className="mobile-tts-settings" aria-label="朗读设置">
+          <label>朗读模式<select value={ttsMode} onChange={(event) => selectTtsMode(event.target.value as TtsMode)}><option value="local">本地模式 · MeloTTS</option><option value="online">联网模式 · EdgeTTS</option></select></label>
+          <label>音色<select value={selectedTtsVoice} onChange={(event) => selectMeloVoice(event.target.value)} disabled={ttsVoicesLoading || ttsProvider === "unavailable" || !privateTtsVoices.length}>{privateTtsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}</select></label>
           <div><span>播放速度</span><p>{MELOTTS_SPEED_OPTIONS.map((speed) => <button key={speed} className={speed === ttsSpeed ? "active" : ""} onClick={() => selectMeloSpeed(speed)}>{speed.toFixed(speed % 1 ? 2 : 1)}×</button>)}</p></div>
-          <small>{ttsProvider === "melotts" ? "切换音色或倍速会从当前段落继续朗读" : "请先连接私有 MeloTTS 服务"}</small>
+          <small>{ttsVoicesLoading ? "正在加载所选模式的音色，请稍候" : ttsProvider !== "unavailable" ? ttsMode === "local" ? "本地 MeloTTS，不会将正文发送至外部语音服务" : "联网 EdgeTTS：朗读片段将发送至 Microsoft Edge 语音服务" : "朗读服务未连接，请确认服务已启动后重试"}</small>
         </div>
         <button onClick={() => { setMobileReaderMenuOpen(false); downloadOriginal(); }}><span>↓</span>{readerDocument.sourceUrl ? "打开原网页" : "下载原文件"}</button><button onClick={() => { setMobileReaderMenuOpen(false); exportH5(); }}><span>⇩</span>一键下载 H5</button><button onClick={() => { setMobileReaderMenuOpen(false); setShareError(""); setSharePanelOpen(true); }}><span>↗</span>生成分享链接</button><button className="mobile-action-cancel" onClick={() => setMobileReaderMenuOpen(false)}>取消</button></section></div>}
       {renderMobileShareSheet()}
@@ -1282,7 +1401,7 @@ export default function Home() {
       <article className="reader-article">
         <div className="article-meta"><span>{readerDocument.siteName}</span><span>·</span><span>{readerDocument.engine === "demo" ? "阅读示例" : readerDocument.engine === "document-processor" ? "已解析上传文件" : "实时网页抓取"}</span>{readerDocument.sourceUrl && <><span>·</span><a href={readerDocument.sourceUrl} target="_blank" rel="noreferrer">查看原网页 ↗</a></>}</div>
         <h1>{readerDocument.title}</h1>
-        <p className="article-deck">{readerDocument.description}</p>
+        {visibleDescription ? <p className="article-deck">{visibleDescription}</p> : null}
         <SourceMetadata items={readerDocument.displayMetadata} />
         <div className="article-rule" />
         {readerDocument.sections.map((section) => <section key={section.id} id={section.id}><h2>{section.title}</h2>{section.paragraphs.map((paragraph, index) => <p key={`${section.id}-${index}`}>{paragraph}</p>)}</section>)}
@@ -1311,8 +1430,9 @@ export default function Home() {
       </div>
       <div className="tts-player">
         <button className="play-button" onClick={playSpeech} aria-label={speaking ? (isMeloSynthesizing ? "取消生成" : "暂停播放") : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
-        <div className="track-info"><div><strong>{isMeloSynthesizing ? "正在生成音频 · " : speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "melotts" ? "MeloTTS" : "私有 TTS 未连接"}</strong><span>{isMeloSynthesizing ? "MeloTTS 正在合成音频，点击暂停可取消" : readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className={`audio-progress${isMeloSynthesizing ? " is-synthesizing" : ""}`}><span style={{ width: `${speechProgress}%` }} /></div></div>
-        <label className="voice-select"><span className="voice-label">MeloTTS 音色</span><select value={selectedTtsVoice} onChange={(event) => selectMeloVoice(event.target.value)} disabled={ttsProvider !== "melotts" || !privateTtsVoices.length}>{privateTtsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}</select></label>
+        <div className="track-info"><div><strong>{isMeloSynthesizing ? "正在生成音频 · " : speaking ? "正在朗读 · " : ttsVoicesLoading ? "正在加载音色 · " : "准备就绪 · "}{ttsProvider === "unavailable" ? ttsVoicesLoading ? "朗读服务" : "朗读服务未连接" : ttsMode === "local" ? "本地 MeloTTS" : "联网 EdgeTTS"}</strong><span>{isMeloSynthesizing ? `${ttsMode === "local" ? "MeloTTS" : "EdgeTTS"} 正在合成音频，点击暂停可取消` : readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className={`audio-progress${isMeloSynthesizing ? " is-synthesizing" : ""}`}><span style={{ width: `${speechProgress}%` }} /></div></div>
+        <label className="voice-select"><span className="voice-label">朗读模式</span><select value={ttsMode} onChange={(event) => selectTtsMode(event.target.value as TtsMode)}><option value="local">本地 · MeloTTS</option><option value="online">联网 · EdgeTTS</option></select></label>
+        <label className="voice-select"><span className="voice-label">音色</span><select value={selectedTtsVoice} onChange={(event) => selectMeloVoice(event.target.value)} disabled={ttsVoicesLoading || ttsProvider === "unavailable" || !privateTtsVoices.length}>{privateTtsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}</select></label>
         <label className="speed-pill"><span className="voice-label">倍速</span><select value={ttsSpeed} onChange={(event) => selectMeloSpeed(Number(event.target.value))}>{MELOTTS_SPEED_OPTIONS.map((speed) => <option key={speed} value={speed}>{speed.toFixed(speed % 1 ? 2 : 1)}×</option>)}</select></label>
       </div>
       {notice && <button className="toast" onClick={() => setNotice("")} aria-label="关闭提示">{notice}<span>×</span></button>}

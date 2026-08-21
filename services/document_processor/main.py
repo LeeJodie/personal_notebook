@@ -48,6 +48,19 @@ def section(title: str, paragraphs: list[str], index: int) -> dict[str, Any] | N
     }
 
 
+def markdown_starts_paragraph(previous: str, current: str) -> bool:
+    """Keep logical source lines in plain policy-style Markdown readable.
+
+    Markdown permits soft wrapping, so ordinary wrapped lines still join.  But
+    uploads exported from government sites commonly omit blank lines between a
+    numbered question, its answer, and the next question.  Those must become
+    independent reader/TTS paragraphs.
+    """
+    if re.match(r"^(?:[一二三四五六七八九十百零〇]+、|\d+[.、]|[问答][：:])", current):
+        return True
+    return bool(re.search(r"[。！？；;]$", previous))
+
+
 def markdown_sections(text: str) -> list[dict[str, Any]]:
     groups: list[tuple[str, list[str]]] = []
     title, paragraphs, buffer = "正文", [], []
@@ -73,7 +86,10 @@ def markdown_sections(text: str) -> list[dict[str, Any]]:
         elif not line:
             flush_paragraph()
         else:
-            buffer.append(line.lstrip("-*+ "))
+            content = line.lstrip("-*+ ")
+            if buffer and markdown_starts_paragraph(buffer[-1], content):
+                flush_paragraph()
+            buffer.append(content)
     flush_section()
     return [candidate for index, (heading, lines) in enumerate(groups[:MAX_SECTIONS]) if (candidate := section(heading, lines, index))]
 

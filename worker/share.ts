@@ -1,6 +1,6 @@
 import { ensureDocumentStore, getAuthenticatedActor, type DocumentEnv } from "./documents";
 import { isReaderDocument } from "./reader";
-import { listMeloTtsVoices, synthesizeMeloTts, type TtsEnv } from "./tts";
+import { listMeloTtsVoices, synthesizeMeloTts, type TtsEnv, type TtsMode } from "./tts";
 
 interface ShareDocumentRow {
   id: string;
@@ -86,17 +86,18 @@ export async function handleShareRequest(request: Request, env: DocumentEnv & Pi
     const ttsHeaders = new Headers({ "x-tenant-id": share.tenant_id, "x-owner-user-id": share.owner_user_id });
     if (ttsAction === "voices") {
       if (request.method !== "GET") return error("不支持该分享朗读操作。", 405, "METHOD_NOT_ALLOWED");
-      try { return json(await listMeloTtsVoices(env, ttsHeaders)); }
+      try { return json(await listMeloTtsVoices(env, ttsHeaders, url.searchParams.get("mode") === "online" ? "online" : "local")); }
       catch (reason) { return error(reason instanceof Error ? reason.message : "私有 MeloTTS 服务不可用。", 503, "TTS_UNAVAILABLE"); }
     }
     if (ttsAction === "synthesize") {
       if (request.method !== "POST") return error("不支持该分享朗读操作。", 405, "METHOD_NOT_ALLOWED");
-      const body = await request.json<{ text?: string; voice_id?: string; speed?: number }>().catch(() => null);
+      const body = await request.json<{ text?: string; voice_id?: string; speed?: number; mode?: TtsMode }>().catch(() => null);
       try {
         return await synthesizeMeloTts(env, {
           text: body?.text?.trim() || "",
           voiceId: body?.voice_id?.trim() || "",
           speed: Number(body?.speed) || 1,
+          mode: body?.mode === "online" ? "online" : "local",
         }, ttsHeaders, request.signal);
       } catch (reason) {
         return error(reason instanceof Error ? reason.message : "MeloTTS 合成失败。", 503, "TTS_UNAVAILABLE");

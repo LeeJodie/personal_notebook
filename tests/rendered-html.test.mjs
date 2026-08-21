@@ -39,6 +39,7 @@ test("URL imports use the persistent document API and dynamic reader data", asyn
   assert.match(page, /fetch\("\/v1\/documents:import-url"/);
   assert.match(page, /fetch\("\/v1\/documents:upload"/);
   assert.match(page, /readerDocument\.sections\.map/);
+  assert.doesNotMatch(page, /!result\.reader\.description \|\| !Array\.isArray\(result\.reader\.sections\)/);
   assert.match(page, /未生成任何替代内容/);
   assert.match(worker, /handleCrawlRequest/);
   assert.match(crawler, /extractDocumentFromHtml/);
@@ -57,6 +58,12 @@ test("Crawl4AI keeps policy bodies complete and separates visible source facts f
   assert.match(crawler, /content_selector = content_selector_for\(target\)/);
   assert.match(crawler, /crawler_run_config\(content_selector\)/);
   assert.match(crawler, /#mainText \.view/);
+  assert.match(crawler, /word_count_threshold=1/);
+  assert.match(crawler, /beijing_policy_body_html/);
+  assert.match(crawler, /beijing_policy_markdown = html_body_to_markdown/);
+  assert.match(crawler, /is_page_chrome/);
+  assert.match(crawler, /is_redundant_description/);
+  assert.match(crawler, /html_body_to_markdown\(metadata_html, source_url\)/);
   assert.match(crawler, /getattr\(markdown_result, "raw_markdown"/);
   assert.match(crawler, /extract_display_metadata/);
   assert.match(crawler, /displayMetadata=display_metadata/);
@@ -64,6 +71,8 @@ test("Crawl4AI keeps policy bodies complete and separates visible source facts f
   assert.match(crawlWorker, /LOCAL_CRAWLER_URL/);
   assert.match(crawlWorker, /npm run dev:crawler/);
   assert.match(crawlWorker, /extractBeijingPolicyBody/);
+  assert.match(crawlWorker, /return view \|\| mainText/);
+  assert.match(crawlWorker, /PDF\\s\*格式下载/);
   assert.match(crawlWorker, /elementContents/);
   assert.match(crawlWorker, /scopedPolicyBody \? \{ title: "网页正文", paragraphs: \[\] \} : null/);
   assert.match(crawlWorker, /<strong\\b/);
@@ -85,9 +94,16 @@ test("reader exposes H5 download, configurable MeloTTS playback and a revocable 
   ]);
   assert.match(page, /一键下载 H5/);
   assert.match(page, /生成分享链接/);
-  assert.match(page, /useState<"unavailable" \| "melotts">\("unavailable"\)/);
+  assert.match(page, /useState<"unavailable" \| "melotts" \| "edge-tts">\("unavailable"\)/);
   assert.match(page, /selectedTtsVoice/);
   assert.match(page, /MELOTTS_SPEED_OPTIONS = \[0\.5, 0\.75, 1, 1\.25, 1\.5, 2\]/);
+  assert.match(page, /const \[ttsMode, setTtsMode\] = useState<TtsMode>\("local"\)/);
+  assert.match(page, /本地模式 · MeloTTS/);
+  assert.match(page, /联网模式 · EdgeTTS/);
+  assert.match(page, /if \(ttsProvider !== "unavailable"\)/);
+  assert.match(page, /const \[ttsVoicesLoading, setTtsVoicesLoading\] = useState\(false\)/);
+  assert.match(page, /正在加载音色，请稍候再开始朗读/);
+  assert.match(page, /aria-label="收起面板"/);
   assert.match(page, /\/v1\/documents\/\$\{readerDocument\.documentId\}\/shares/);
   assert.match(shareWorker, /handleShareRequest/);
   assert.match(shareWorker, /tokenHash/);
@@ -103,7 +119,15 @@ test("reader exposes H5 download, configurable MeloTTS playback and a revocable 
   assert.match(sharePage, /tts\/synthesize/);
   assert.doesNotMatch(sharePage, /speechSynthesis/);
   assert.match(page, /privateTtsVoices/);
+  assert.match(page, /function readerDescription/);
+  assert.match(sharePage, /function readerDescription/);
   assert.match(page, /MeloTTS/);
+  assert.match(page, /mobile-dock-progress/);
+  assert.match(page, /拖动定位朗读进度/);
+  assert.match(page, /prefetchMeloAhead/);
+  assert.match(page, /readerSpeechText/);
+  assert.match(page, /缓存播放/);
+  assert.match(page, /ttsAudioCacheRequest/);
   assert.doesNotMatch(page, /mobile-reader-section-index/);
   assert.doesNotMatch(page, /<p className="section-eyebrow">\{section\.eyebrow\}/);
   assert.doesNotMatch(reader, /<p class="eyebrow">\$\{escapeHtml\(section\.eyebrow\)\}/);
@@ -117,6 +141,22 @@ test("reader exposes H5 download, configurable MeloTTS playback and a revocable 
   assert.match(meloTts, /ge=0\.5, le=2\.0/);
   assert.doesNotMatch(meloTts, /vars\(getattr\(melo_tts\.hps\.data, "spk2id"/);
   assert.match(meloTts, /MeloTTS-Chinese/);
+  assert.match(meloTts, /EDGE_VOICES/);
+  assert.match(meloTts, /synthesize_edge/);
+  assert.match(meloTts, /edge_tts\.Communicate/);
+  assert.match(sharePage, /联网 · EdgeTTS/);
+  assert.match(sharePage, /shared-player-progress/);
+  assert.match(sharePage, /缓存播放/);
+  const audioCache = await readFile(new URL("app/lib/tts-audio-cache.ts", root), "utf8");
+  assert.match(audioCache, /shengyue-tts-audio-v1/);
+  assert.match(audioCache, /TTS_AUDIO_CACHE_LIMIT = 80/);
+  assert.match(meloTts, /def normalize_spoken_numbers/);
+  assert.match(meloTts, /DATE_PATTERN/);
+  assert.match(meloTts, /TIME_PATTERN/);
+  assert.match(meloTts, /LANDLINE_PHONE_PATTERN/);
+  assert.match(meloTts, /LABELED_LOCAL_PHONE_PATTERN/);
+  assert.match(meloTts, /BARE_LONG_NUMBER_PATTERN/);
+  assert.match(meloTts, /value = normalize_spoken_numbers\(value\)/);
 });
 
 test("all in-app destinations retain the phone interface", async () => {
@@ -147,12 +187,15 @@ test("clipboard imports distinguish web links from text and home only shows save
   assert.match(page, /isWebAddress\(content\)/);
   assert.match(page, /new File\(\[content\], "剪贴板内容\.txt"/);
   assert.match(page, /mobile-clipboard-zone/);
+  assert.match(page, /function MobileImportIcon/);
+  assert.match(page, /<MobileImportIcon kind="file" \/>/);
   assert.match(page, /正在同步你的真实资料/);
   assert.match(page, /完成一次文件、网页或剪贴板导入后/);
   assert.doesNotMatch(page, /为什么伟大不能被计划/);
   assert.doesNotMatch(page, /Q2 团队复盘纪要/);
   assert.doesNotMatch(page, /消费电子趋势报告/);
   assert.match(styles, /\.mobile-clipboard-zone/);
+  assert.match(styles, /Import entry: use stable SVG artwork/);
   assert.match(styles, /\.mobile-material-empty/);
 });
 
@@ -221,4 +264,31 @@ test("TXT titles, phone accounts, server-side ownership and back navigation are 
   assert.match(schema, /idx_local_users_phone/);
   assert.match(sharePage, /shared-back-button/);
   assert.match(api, /TXT/);
+});
+
+test("third-party local deployment scripts install and manage the private stack", async () => {
+  const [deploy, start, restart, common, guide] = await Promise.all([
+    readFile(new URL("deploy.sh", root), "utf8"),
+    readFile(new URL("start.sh", root), "utf8"),
+    readFile(new URL("restart.sh", root), "utf8"),
+    readFile(new URL("scripts/local-common.sh", root), "utf8"),
+    readFile(new URL("docs/LOCAL_DEPLOYMENT.md", root), "utf8"),
+  ]);
+  assert.match(deploy, /npm ci/);
+  assert.match(deploy, /crawl4ai-setup/);
+  assert.match(deploy, /document_processor\/requirements\.txt/);
+  assert.match(deploy, /https:\/\/github\.com\/myshell-ai\/MeloTTS\.git/);
+  assert.match(deploy, /download_model\.py/);
+  assert.match(deploy, /exec \.\/start\.sh/);
+  assert.match(start, /--host 0\.0\.0\.0 --port 3000/);
+  assert.match(start, /--host 127\.0\.0\.1 --port 8780/);
+  assert.match(start, /--host 127\.0\.0\.1 --port 9876/);
+  assert.match(start, /8780\/healthz/);
+  assert.match(start, /8765\/healthz/);
+  assert.match(restart, /stop_service crawler/);
+  assert.match(restart, /exec "\$ROOT_DIR\/start\.sh"/);
+  assert.match(common, /service_is_running/);
+  assert.match(common, /kill -0/);
+  assert.match(guide, /\.\/deploy\.sh/);
+  assert.match(guide, /局域网/);
 });

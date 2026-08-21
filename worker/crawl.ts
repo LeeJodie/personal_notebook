@@ -88,7 +88,9 @@ function extractBeijingPolicyBody(html: string, sourceUrl: string): string | nul
   const mainText = elementContents(html, /<div\b[^>]*\bid=["']mainText["'][^>]*>/i);
   if (!mainText) return null;
   const view = elementContents(mainText, /<div\b[^>]*\bclass=["'][^"']*\bview\b[^"']*["'][^>]*>/i);
-  return view && plainText(view).length > 300 ? view : mainText;
+  // Short notices are valid articles too. Falling back solely because a view
+  // has fewer than 300 characters pulls page-level controls into TTS.
+  return view || mainText;
 }
 
 function chooseContentRoot(html: string): string {
@@ -101,10 +103,27 @@ function chooseContentRoot(html: string): string {
 
 function isUsefulLine(line: string): boolean {
   if (line.length < 2 || line.length > 900) return false;
-  if (/^(?:首页|登录|注册|退出|返回顶部|回到顶部|关闭|打开|更多(?:>{1,2})?|查看(?:更多|详情)|搜索|菜单|网站地图|联系我们|网站声明|无障碍|适老版)$/.test(line)) return false;
+  if (/^(?:首页|登录|注册|退出|返回顶部|回到顶部|关闭|打开|更多(?:>{1,2})?|查看(?:更多|详情)|搜索|菜单|网站地图|联系我们|网站声明|无障碍|适老版|政府门户网站|公报\s*PDF|PDF\s*格式下载|收藏|取消收藏|打印|字号：?\s*大\s*中\s*小)$/.test(line)) return false;
   if (/[{}]{2,}|(?:function|document\.|window\.|var\s+\w+\s*=|@media|font-family|display\s*:)/i.test(line)) return false;
   if ((line.match(/[|_=>]/g) ?? []).length > Math.max(8, line.length / 5)) return false;
   return true;
+}
+
+function isStructuralHeading(line: string): boolean {
+  // Some sites wrap an entire numbered policy sentence in <strong>.  It must
+  // remain a spoken paragraph, not become a heading with no body and vanish
+  // during section normalization.
+  const text = plainText(line);
+  if (!text || text.length > 80 || /[，,。！？；;：:]/.test(text)) return false;
+  return /^(?:第[一二三四五六七八九十百零〇\d]+[章节]|[一二三四五六七八九十百零〇\d]+、)/.test(text)
+    || text.length <= 48;
+}
+
+function isRedundantDescription(description: string, sections: Array<{ paragraphs: string[] }>): boolean {
+  const compactDescription = description.replace(/\s+/g, "");
+  if (compactDescription.length < 12) return false;
+  const compactBody = sections.flatMap((section) => section.paragraphs).join("").replace(/\s+/g, "");
+  return compactBody.includes(compactDescription.replace(/[。！？，；,.!?]+$/g, ""));
 }
 
 function uniqueId(title: string, index: number): string {
@@ -127,7 +146,10 @@ export function extractDocumentFromHtml(html: string, sourceUrl: string): CrawlD
     .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<(script|style|noscript|template|svg|canvas|form|footer|nav)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
     .replace(/<(h[1-3])\b[^>]*>([\s\S]*?)<\/\1>/gi, (_, tag: string, inner: string) => `\n@@H${tag.slice(1)}@@ ${plainText(inner)}\n`)
-    .replace(/<p\b[^>]*>\s*<strong\b[^>]*>([\s\S]*?)<\/strong>\s*<\/p>/gi, (_, inner: string) => `\n@@H2@@ ${plainText(inner)}\n`)
+    .replace(/<p\b[^>]*>\s*<strong\b[^>]*>([\s\S]*?)<\/strong>\s*<\/p>/gi, (_, inner: string) => {
+      const text = plainText(inner);
+      return isStructuralHeading(text) ? `\n@@H2@@ ${text}\n` : `\n${text}\n`;
+    })
     .replace(/<(p|li|dt|dd|blockquote|figcaption|td|th)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_, _tag: string, inner: string) => `\n${plainText(inner)}\n`)
     .replace(/<br\s*\/?\s*>/gi, "\n")
     .replace(/<[^>]+>/g, " ");
@@ -207,7 +229,9 @@ export function extractDocumentFromHtml(html: string, sourceUrl: string): CrawlD
   );
   return {
     title,
-    description: description || normalizedSections[0].paragraphs[0] || "",
+    // Meta description is a portal-generated summary, not source prose. Keep
+    // the reader faithful to the extracted article paragraphs only.
+    description: "",
     sourceUrl,
     siteName,
     fetchedAt: new Date().toISOString(),

@@ -19,7 +19,7 @@ COPY runtime.py /opt/melotts/runtime.py
 COPY server.py /opt/melotts/server.py
 
 RUN python -m pip install --no-cache-dir --upgrade 'pip<25' 'setuptools<81' \
-    && python -m pip install --no-cache-dir -r MeloTTS/requirements.txt
+    && python -m pip install --no-cache-dir -r MeloTTS/requirements.txt edge-tts
 
 # CloudBase Run injects PORT at runtime. Do not hard-code the local-only 9876
 # port here: its health probe and internal discovery address need the container
