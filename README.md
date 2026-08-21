@@ -17,7 +17,7 @@ URL 导入已连接真实服务端抓取，并将 Reader JSON、H5、知识分�
 
 它会安装前端依赖、Crawl4AI/Chromium、文档解析器和私有 MeloTTS 中文模型，并启动所有服务；后续使用 `./start.sh` 启动或 `./restart.sh` 重启。详见 [`docs/LOCAL_DEPLOYMENT.md`](docs/LOCAL_DEPLOYMENT.md)。
 
-前置条件：Node.js `>=22.13.0`。
+前置条件：Node.js `>=22.13.0`。面向第三方的完整交付说明见 [`docs/DEPLOYMENT_GUIDE.md`](docs/DEPLOYMENT_GUIDE.md)。
 
 ```bash
 npm ci
