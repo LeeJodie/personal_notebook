@@ -74,7 +74,7 @@ test("Crawl4AI keeps policy bodies complete and separates visible source facts f
   assert.doesNotMatch(sharePage, /\[document\.title, document\.description, \.\.\.document\.sections/);
 });
 
-test("reader exposes H5 download, default MeloTTS playback and a revocable share link", async () => {
+test("reader exposes H5 download, configurable MeloTTS playback and a revocable share link", async () => {
   const [page, shareWorker, sharePage, ttsWorker, meloTts, reader] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("worker/share.ts", root), "utf8"),
@@ -86,19 +86,22 @@ test("reader exposes H5 download, default MeloTTS playback and a revocable share
   assert.match(page, /一键下载 H5/);
   assert.match(page, /生成分享链接/);
   assert.match(page, /useState<"unavailable" \| "melotts">\("unavailable"\)/);
-  assert.match(page, /MeloTTS · 私有中文自然女声/);
+  assert.match(page, /selectedTtsVoice/);
+  assert.match(page, /MELOTTS_SPEED_OPTIONS = \[0\.5, 0\.75, 1, 1\.25, 1\.5, 2\]/);
   assert.match(page, /\/v1\/documents\/\$\{readerDocument\.documentId\}\/shares/);
   assert.match(shareWorker, /handleShareRequest/);
   assert.match(shareWorker, /tokenHash/);
   assert.match(shareWorker, /status = 'revoked'/);
   assert.match(shareWorker, /SHARE_DOWNLOAD_FORBIDDEN/);
-  assert.match(sharePage, /下载 H5/);
+  assert.match(shareWorker, /ttsAction === "synthesize"/);
+  assert.match(shareWorker, /synthesizeMeloTts/);
+  assert.match(sharePage, /↓ H5/);
   assert.match(sharePage, /\/v1\/public\/shares\//);
   assert.doesNotMatch(page, /const speakFromOffset/);
-  assert.match(page, /MeloTTS 私有语音/);
-  assert.match(sharePage, /shared-default-voice/);
-  assert.doesNotMatch(page, /const changeVoice/);
-  assert.doesNotMatch(sharePage, /const changeVoice/);
+  assert.match(page, /selectMeloVoice/);
+  assert.match(sharePage, /const changeVoice/);
+  assert.match(sharePage, /tts\/synthesize/);
+  assert.doesNotMatch(sharePage, /speechSynthesis/);
   assert.match(page, /privateTtsVoices/);
   assert.match(page, /MeloTTS/);
   assert.doesNotMatch(page, /mobile-reader-section-index/);
@@ -106,8 +109,12 @@ test("reader exposes H5 download, default MeloTTS playback and a revocable share
   assert.doesNotMatch(reader, /<p class="eyebrow">\$\{escapeHtml\(section\.eyebrow\)\}/);
   assert.match(ttsWorker, /CUSTOMER_HTTP_TTS/);
   assert.match(ttsWorker, /\/v1\/synthesize/);
+  assert.match(ttsWorker, /MIN_MELOTTS_SPEED = 0\.5/);
+  assert.match(ttsWorker, /MAX_MELOTTS_SPEED = 2/);
   assert.match(meloTts, /tts_to_file/);
   assert.match(meloTts, /spk2id/);
+  assert.match(meloTts, /speaker_ids\.items\(\)/);
+  assert.match(meloTts, /ge=0\.5, le=2\.0/);
   assert.doesNotMatch(meloTts, /vars\(getattr\(melo_tts\.hps\.data, "spk2id"/);
   assert.match(meloTts, /MeloTTS-Chinese/);
 });

@@ -39,20 +39,24 @@ UNSUPPORTED_TEXT_PATTERN = re.compile(r"[^\u4e00-\u9fa5A-Za-z0-9\s!?…,.\-']+")
 class SynthesisRequest(BaseModel):
     text: str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
     voice_id: str = Field(min_length=1, max_length=120)
-    speed: float = Field(default=1.0, ge=0.75, le=1.25)
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
 
 
 def voices_from_model() -> list[dict[str, str]]:
     if melo_tts is None:
         return []
     speaker_ids = getattr(melo_tts.hps.data, "spk2id", {})
+    # MeloTTS stores this as its HParams wrapper rather than a normal dict.
+    # Iterating that wrapper calls __getitem__ with integers and raises; its
+    # public items() API works for both HParams and regular mappings.
+    speaker_items = speaker_ids.items() if hasattr(speaker_ids, "items") else []
     return [
         {
             "id": speaker_id,
             "label": "中文自然女声" if speaker_id == "ZH" else f"MeloTTS {speaker_id}",
             "language": "zh-CN",
         }
-        for speaker_id in speaker_ids
+        for speaker_id, _ in speaker_items
     ]
 
 

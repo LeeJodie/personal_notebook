@@ -21,3 +21,18 @@ MeloTTS 官方项目声明 CPU 可以用于实时推理；本服务仍应以实�
 ```bash
 docker build -f services/melotts/Dockerfile -t shengyue-melotts services/melotts
 ```
+
+## CloudBase 免费环境体验部署
+
+本镜像已适配 CloudBase 云托管：平台注入 `PORT`，服务会监听该端口；本机仍使用 `9876`。
+
+在 CloudBase 上海免费体验环境创建云托管服务时，使用本目录作为构建上下文，选择 `services/melotts/Dockerfile`，并设定：
+
+- 服务名：`shengyue-melotts`
+- 监听端口：`8080`
+- 规格：先使用最低 CPU 规格；副本范围 `0–1`
+- 健康检查路径：`/health`，初始延迟至少 `90` 秒
+- 网络：仅开启**内网访问**，不要开启公网访问
+- 环境变量：`MELOTTS_DEVICE=cpu`、`MELOTTS_DISABLE_BERT=1`
+
+免费环境的 3000 资源点只适合短时体验。MeloTTS 需加载约 200 MB 模型且 CPU 推理耗时明显；将最小副本设为 `0` 可以避免空闲持续消耗资源，但首次朗读会有冷启动。不能把云托管的内部地址发送给手机，手机只能访问应用生成的 HTTPS 分享链接；应用 API 在校验分享 token 后再从内网调用本服务。

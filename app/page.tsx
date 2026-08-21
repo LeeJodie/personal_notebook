@@ -85,6 +85,7 @@ const MELOTTS_INITIAL_TARGET_CHARS = 42;
 const MELOTTS_INITIAL_MAX_CHARS = 86;
 const MELOTTS_SEGMENT_TARGET_CHARS = 110;
 const MELOTTS_SEGMENT_MAX_CHARS = 180;
+const MELOTTS_SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 const WEB_ADDRESS_PATTERN = /^(https?:\/\/)?(?:(?:[a-z0-9-]+\.)+[a-z]{2,}|localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?(?:[/?#][^\s]*)?$/i;
 
 function isWebAddress(value: string): boolean {
@@ -206,6 +207,8 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [processingName, setProcessingName] = useState("");
   const [privateTtsVoices, setPrivateTtsVoices] = useState<PrivateTtsVoice[]>([]);
+  const [selectedTtsVoice, setSelectedTtsVoice] = useState("");
+  const [ttsSpeed, setTtsSpeed] = useState<number>(1);
   // The workbench must never present a browser voice as private TTS. MeloTTS
   // is selected only after its internal service returns an available voice.
   const [ttsProvider, setTtsProvider] = useState<"unavailable" | "melotts">("unavailable");
@@ -252,7 +255,7 @@ export default function Home() {
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const privateProgressFrameRef = useRef<number | null>(null);
   const meloRequestControllersRef = useRef(new Set<AbortController>());
-  const meloPrefetchRef = useRef<{ session: number; offset: number; promise: Promise<MeloAudioSegment | null> } | null>(null);
+  const meloPrefetchRef = useRef<{ session: number; offset: number; voiceId: string; speed: number; promise: Promise<MeloAudioSegment | null> } | null>(null);
   const speechOffsetRef = useRef(0);
   const speechSessionRef = useRef(0);
   const crawlAbortRef = useRef<AbortController | null>(null);
@@ -321,6 +324,7 @@ export default function Home() {
           return;
         }
         setPrivateTtsVoices(result.items);
+        setSelectedTtsVoice((current) => result.items?.some((voice) => voice.id === current) ? current : result.items?.[0]?.id || "");
         setTtsProvider("melotts");
       })
       .catch(() => { if (active) setTtsProvider("unavailable"); });
@@ -438,7 +442,8 @@ export default function Home() {
     stopSpeech(true);
     setCurrentUser(null);
     setPrivateTtsVoices([]);
-    setTtsProvider("browser");
+    setTtsProvider("unavailable");
+    setSelectedTtsVoice("");
     setStoredDocuments([]);
     setLibraryLoading(false);
     setSearchHits([]);
@@ -655,7 +660,7 @@ export default function Home() {
     }
   };
 
-  const fetchMeloSegment = async (offset: number, preferFastStart: boolean, selectedVoice: string, session: number, audioContext: AudioContext): Promise<MeloAudioSegment | null> => {
+  const fetchMeloSegment = async (offset: number, preferFastStart: boolean, selectedVoice: string, speed: number, session: number, audioContext: AudioContext): Promise<MeloAudioSegment | null> => {
     const segment = nextMeloTextSegment(articleText, offset, preferFastStart);
     if (!segment?.text || speechSessionRef.current !== session) return null;
     const controller = new AbortController();
@@ -664,7 +669,7 @@ export default function Home() {
       const response = await fetch("/v1/tts/synthesize", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: segment.text, voice_id: selectedVoice, speed: 1 }),
+        body: JSON.stringify({ text: segment.text, voice_id: selectedVoice, speed }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -678,18 +683,18 @@ export default function Home() {
     }
   };
 
-  const prefetchMeloSegment = (offset: number, selectedVoice: string, session: number, audioContext: AudioContext) => {
+  const prefetchMeloSegment = (offset: number, selectedVoice: string, speed: number, session: number, audioContext: AudioContext) => {
     if (offset >= articleText.length || speechSessionRef.current !== session) return;
     const existing = meloPrefetchRef.current;
-    if (existing?.session === session && existing.offset === offset) return;
-    const promise = fetchMeloSegment(offset, false, selectedVoice, session, audioContext);
+    if (existing?.session === session && existing.offset === offset && existing.voiceId === selectedVoice && existing.speed === speed) return;
+    const promise = fetchMeloSegment(offset, false, selectedVoice, speed, session, audioContext);
     // The promise is deliberately awaited at the segment boundary. Attach a
     // handler now so an aborted background request never becomes unhandled.
     void promise.catch(() => undefined);
-    meloPrefetchRef.current = { session, offset, promise };
+    meloPrefetchRef.current = { session, offset, voiceId: selectedVoice, speed, promise };
   };
 
-  const playMeloSegment = async (offset: number, selectedVoice: string, session: number, audioContext: AudioContext, prepared?: MeloAudioSegment | null, preferFastStart = false) => {
+  const playMeloSegment = async (offset: number, selectedVoice: string, speed: number, session: number, audioContext: AudioContext, prepared?: MeloAudioSegment | null, preferFastStart = false) => {
     let nextSegment = prepared;
     try {
       if (!nextSegment) {
@@ -697,7 +702,7 @@ export default function Home() {
         nextSegment = await fetchMeloSegment(
           offset,
           preferFastStart,
-          selectedVoice,
+          selectedVoice, speed,
           session,
           audioContext,
         );
@@ -712,7 +717,7 @@ export default function Home() {
       const followingOffset = offset + nextSegment.text.length;
       // Start the next CPU synthesis as soon as audio begins. It will normally
       // finish while the listener is hearing the current segment.
-      prefetchMeloSegment(followingOffset, selectedVoice, session, audioContext);
+      prefetchMeloSegment(followingOffset, selectedVoice, speed, session, audioContext);
       const updateProgress = () => {
         if (speechSessionRef.current !== session || audioSourceRef.current !== source || nextSegment.audioBuffer.duration <= 0) return;
         const elapsed = Math.min(nextSegment.audioBuffer.duration, Math.max(0, audioContext.currentTime - startedAt));
@@ -735,11 +740,11 @@ export default function Home() {
         }
         const prefetched = meloPrefetchRef.current;
         meloPrefetchRef.current = null;
-        if (prefetched?.session === session && prefetched.offset === followingOffset) {
-          void prefetched.promise.then((audio) => playMeloSegment(followingOffset, selectedVoice, session, audioContext, audio)).catch(() => playMeloSegment(followingOffset, selectedVoice, session, audioContext));
+        if (prefetched?.session === session && prefetched.offset === followingOffset && prefetched.voiceId === selectedVoice && prefetched.speed === speed) {
+          void prefetched.promise.then((audio) => playMeloSegment(followingOffset, selectedVoice, speed, session, audioContext, audio)).catch(() => playMeloSegment(followingOffset, selectedVoice, speed, session, audioContext));
           return;
         }
-        void playMeloSegment(followingOffset, selectedVoice, session, audioContext);
+        void playMeloSegment(followingOffset, selectedVoice, speed, session, audioContext);
       };
       source.start();
       setTtsPlaybackState("playing");
@@ -752,7 +757,7 @@ export default function Home() {
     }
   };
 
-  const speakWithMeloTts = (requestedOffset: number, selectedVoice = privateTtsVoices[0]?.id || "") => {
+  const speakWithMeloTts = (requestedOffset: number, selectedVoice = selectedTtsVoice || privateTtsVoices[0]?.id || "", speed = ttsSpeed) => {
     if (!articleText || !selectedVoice) {
       setNotice("MeloTTS 音色尚未就绪，请稍后再试。");
       return;
@@ -769,7 +774,23 @@ export default function Home() {
     setSpeechProgress(Math.round((offset / articleText.length) * 100));
     setSpeaking(true);
     setTtsPlaybackState("synthesizing");
-    void playMeloSegment(offset, selectedVoice, session, audioContext, undefined, true);
+    void playMeloSegment(offset, selectedVoice, speed, session, audioContext, undefined, true);
+  };
+
+  const selectMeloVoice = (voiceId: string) => {
+    if (!voiceId || voiceId === selectedTtsVoice) return;
+    const offset = speechProgress >= 100 ? 0 : speechOffsetRef.current;
+    const shouldResume = speaking;
+    setSelectedTtsVoice(voiceId);
+    if (shouldResume) speakWithMeloTts(offset, voiceId, ttsSpeed);
+  };
+
+  const selectMeloSpeed = (speed: number) => {
+    if (speed === ttsSpeed) return;
+    const offset = speechProgress >= 100 ? 0 : speechOffsetRef.current;
+    const shouldResume = speaking;
+    setTtsSpeed(speed);
+    if (shouldResume) speakWithMeloTts(offset, selectedTtsVoice || privateTtsVoices[0]?.id || "", speed);
   };
 
   const playSpeech = () => {
@@ -1005,6 +1026,20 @@ export default function Home() {
     void submitUrl();
   };
 
+  const selectMobileTab = (nextView: "create" | "library" | "history") => {
+    if (nextView === view) return;
+    // The bottom bar is a primary navigation, so it should not add drill-in history.
+    setViewHistory([]);
+    setView(nextView);
+    if (nextView !== "create") void loadLibrary();
+  };
+
+  const renderMobileBottomNav = (activeView: "create" | "library" | "history") => <nav className="mobile-bottom-nav" aria-label="移动端主导航">
+    <button className={activeView === "create" ? "active" : ""} onClick={() => selectMobileTab("create")} aria-current={activeView === "create" ? "page" : undefined}>⌂<span>首页</span></button>
+    <button className={activeView === "library" ? "active" : ""} onClick={() => selectMobileTab("library")} aria-current={activeView === "library" ? "page" : undefined}>▦<span>资料</span></button>
+    <button className={activeView === "history" ? "active" : ""} onClick={() => selectMobileTab("history")} aria-current={activeView === "history" ? "page" : undefined}>◷<span>记录</span></button>
+  </nav>;
+
   const renderMobileCreate = () => {
     const materialItems = storedDocuments.slice(0, 3).map((item) => ({ id: item.id, type: item.source_type === "url" ? "网页" : item.filename?.split(".").pop()?.toUpperCase() || "文件", title: item.title, meta: item.status === "ready" ? `已完成 · 约 ${Math.max(1, Math.ceil(item.word_count / 350))} 分钟` : `处理中 · ${item.progress}%`, stored: item }));
     const clipboardIsWebAddress = isWebAddress(clipboardContent);
@@ -1062,7 +1097,8 @@ export default function Home() {
 
       <section className="mobile-materials"><div className="mobile-section-heading"><h2>我的资料</h2><button onClick={openLibrary}>全部 →</button></div><div className="mobile-material-list">{!authReady || libraryLoading ? <p className="mobile-material-placeholder">正在同步你的真实资料…</p> : libraryError ? <p className="mobile-material-placeholder" role="alert">资料加载失败，请点击“全部”后重试。</p> : materialItems.length ? materialItems.map((item) => <button key={item.id} className="mobile-material-item" onClick={() => void openStoredDocument(item.stored)}><span className={`mobile-type ${item.type.toLowerCase()}`}>{item.type}</span><span><strong>{item.title}</strong><small>{item.meta}</small></span><i>▶</i></button>) : <div className="mobile-material-empty"><strong>还没有资料</strong><small>完成一次文件、网页或剪贴板导入后，资料会显示在这里。</small></div>}</div></section>
       {renderMobileAccountSheet()}
-      {notice && <div className="mobile-notice" role="status">{notice}</div>}
+      {notice && <button className="mobile-notice" onClick={() => setNotice("")} aria-live="polite">{notice}<span>×</span></button>}
+      {renderMobileBottomNav("create")}
     </main>;
   };
 
@@ -1096,7 +1132,8 @@ export default function Home() {
   const renderMobileReader = () => {
     const documentType = selectedFile?.name.split(".").pop()?.toUpperCase() || (readerDocument.sourceUrl ? "网页" : "资料");
     const duration = Math.max(1, Math.ceil(readerDocument.wordCount / 350));
-    const ttsLabel = ttsProvider === "melotts" ? "MeloTTS · 私有中文自然女声" : "私有 MeloTTS 未连接";
+    const selectedVoiceLabel = privateTtsVoices.find((voice) => voice.id === selectedTtsVoice)?.label || "MeloTTS 音色准备中";
+    const ttsLabel = ttsProvider === "melotts" ? `MeloTTS · ${selectedVoiceLabel}` : "私有 MeloTTS 未连接";
     return <main className="mobile-route-page mobile-reader-screen">
       <header className="mobile-route-header"><button onClick={handleReaderBack} aria-label="返回上一页">‹</button><strong>听读</strong><button onClick={() => setMobileReaderMenuOpen(true)} aria-label="更多操作">•••</button></header>
       <div className="mobile-reader-summary"><span className={`mobile-reader-type ${documentType.toLowerCase()}`}>{documentType}</span><div><strong>{readerDocument.title}</strong><small>{readerDocument.sections.length} 章 · 约 {duration} 分钟 · 已保存</small></div></div>
@@ -1109,28 +1146,34 @@ export default function Home() {
         <p className="mobile-reader-end">— 已读完全文 —</p>
       </article>
       <div className="mobile-reader-dock"><button className="mobile-play-button" onClick={playSpeech} aria-label={speaking ? "暂停播放" : "开始播放"}>{speaking ? "Ⅱ" : "▶"}</button><div><strong>{speaking ? "正在朗读" : "准备收听"}</strong><small>{ttsLabel} · {Math.round(speechProgress)}%</small></div><button className="mobile-dock-menu" onClick={() => setMobileReaderMenuOpen(true)} aria-label="打开操作菜单">⋯</button></div>
-      {mobileReaderMenuOpen && <div className="mobile-sheet-backdrop" role="presentation"><section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="阅读操作"><div className="mobile-sheet-handle" /><button onClick={() => { setMobileReaderMenuOpen(false); downloadOriginal(); }}><span>↓</span>{readerDocument.sourceUrl ? "打开原网页" : "下载原文件"}</button><button onClick={() => { setMobileReaderMenuOpen(false); exportH5(); }}><span>⇩</span>一键下载 H5</button><button onClick={() => { setMobileReaderMenuOpen(false); setShareError(""); setSharePanelOpen(true); }}><span>↗</span>生成分享链接</button><button className="mobile-action-cancel" onClick={() => setMobileReaderMenuOpen(false)}>取消</button></section></div>}
+      {mobileReaderMenuOpen && <div className="mobile-sheet-backdrop" role="presentation"><section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="阅读操作"><div className="mobile-sheet-handle" />
+        <div className="mobile-tts-settings" aria-label="MeloTTS 朗读设置">
+          <label>音色<select value={selectedTtsVoice} onChange={(event) => selectMeloVoice(event.target.value)} disabled={ttsProvider !== "melotts" || !privateTtsVoices.length}>{privateTtsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}</select></label>
+          <div><span>播放速度</span><p>{MELOTTS_SPEED_OPTIONS.map((speed) => <button key={speed} className={speed === ttsSpeed ? "active" : ""} onClick={() => selectMeloSpeed(speed)}>{speed.toFixed(speed % 1 ? 2 : 1)}×</button>)}</p></div>
+          <small>{ttsProvider === "melotts" ? "切换音色或倍速会从当前段落继续朗读" : "请先连接私有 MeloTTS 服务"}</small>
+        </div>
+        <button onClick={() => { setMobileReaderMenuOpen(false); downloadOriginal(); }}><span>↓</span>{readerDocument.sourceUrl ? "打开原网页" : "下载原文件"}</button><button onClick={() => { setMobileReaderMenuOpen(false); exportH5(); }}><span>⇩</span>一键下载 H5</button><button onClick={() => { setMobileReaderMenuOpen(false); setShareError(""); setSharePanelOpen(true); }}><span>↗</span>生成分享链接</button><button className="mobile-action-cancel" onClick={() => setMobileReaderMenuOpen(false)}>取消</button></section></div>}
       {renderMobileShareSheet()}
       {notice && <button className="mobile-inline-notice" onClick={() => setNotice("")}>{notice}<span>×</span></button>}
     </main>;
   };
 
   const renderMobileLibrary = () => <main className="mobile-route-page mobile-library-screen">
-    <header className="mobile-route-header"><button onClick={() => goBack()} aria-label="返回上一页">‹</button><strong>我的资料</strong><button onClick={openHistory} aria-label="查看处理记录">◷</button></header>
+    <header className="mobile-route-header"><button onClick={() => goBack()} aria-label="返回上一页">‹</button><strong>我的资料</strong><button onClick={() => selectMobileTab("history")} aria-label="查看处理记录">◷</button></header>
     <section className="mobile-library-hero"><p>个人知识库</p><h1>我的资料</h1><span>{storedDocuments.length} 份资料 · 仅自己可见</span></section>
     <div className="mobile-search"><span>⌕</span><input aria-label="搜索知识库" value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void searchLibrary()} placeholder="搜索资料正文…" /><button onClick={() => void searchLibrary()}>搜索</button></div>
     {libraryError && <p className="mobile-page-error" role="alert">{libraryError}</p>}
     {searchHits.length > 0 && <section className="mobile-search-results" aria-label="检索结果">{searchHits.map((hit) => <button key={hit.chunk_id} onClick={() => { const item = storedDocuments.find((document) => document.id === hit.document_id); if (item) void openStoredDocument(item); }}><strong>{hit.document_title}</strong><small>{hit.text}</small></button>)}</section>}
     <section className="mobile-library-list" aria-label="资料列表">{libraryLoading ? <p className="mobile-empty-state">正在读取资料…</p> : storedDocuments.length ? storedDocuments.map((item) => { const type = item.filename?.split(".").pop()?.toUpperCase() || (item.source_type === "url" ? "网页" : "文件"); return <button key={item.id} onClick={() => void openStoredDocument(item)}><span className={`mobile-library-type ${type.toLowerCase()}`}>{type}</span><span><strong>{item.title}</strong><small>{item.status === "ready" ? `已完成 · ${item.word_count.toLocaleString()} 字` : `处理中 · ${item.progress}%`}</small></span><i>›</i></button>; }) : <div className="mobile-empty-state"><strong>还没有资料</strong><p>导入文件或网页后，会自动保存在这里。</p><button onClick={() => setView("create")}>去导入</button></div>}</section>
-    <nav className="mobile-bottom-nav" aria-label="移动端导航"><button onClick={() => setView("create")}>⌂<span>首页</span></button><button className="active">▦<span>资料</span></button><button onClick={openHistory}>◷<span>记录</span></button></nav>
+    {renderMobileBottomNav("library")}
   </main>;
 
   const renderMobileHistory = () => <main className="mobile-route-page mobile-library-screen">
-    <header className="mobile-route-header"><button onClick={() => goBack()} aria-label="返回上一页">‹</button><strong>处理记录</strong><button onClick={openLibrary} aria-label="查看我的资料">▦</button></header>
+    <header className="mobile-route-header"><button onClick={() => goBack()} aria-label="返回上一页">‹</button><strong>处理记录</strong><button onClick={() => selectMobileTab("library")} aria-label="查看我的资料">▦</button></header>
     <section className="mobile-library-hero"><p>处理中心</p><h1>导入记录</h1><span>文件与网页的转换状态</span></section>
     {libraryError && <p className="mobile-page-error" role="alert">{libraryError}</p>}
     <section className="mobile-history-list" aria-label="处理记录列表">{libraryLoading ? <p className="mobile-empty-state">正在读取记录…</p> : storedDocuments.length ? storedDocuments.map((item) => { const type = item.filename?.split(".").pop()?.toUpperCase() || (item.source_type === "url" ? "网页" : "文件"); const status = item.status === "ready" ? "已完成" : item.status === "failed" ? "失败" : "处理中"; return <button key={item.id} onClick={() => item.status === "ready" && void openStoredDocument(item)}><span className={`mobile-history-status ${item.status}`}>{status}</span><span><strong>{item.title}</strong><small>{type} · {new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(item.updated_at))}</small></span><i>{item.status === "ready" ? "›" : ""}</i></button>; }) : <div className="mobile-empty-state"><strong>暂时没有处理记录</strong><p>完成一次导入后，会在这里看到处理状态。</p></div>}</section>
-    <nav className="mobile-bottom-nav" aria-label="移动端导航"><button onClick={() => setView("create")}>⌂<span>首页</span></button><button onClick={openLibrary}>▦<span>资料</span></button><button className="active">◷<span>记录</span></button></nav>
+    {renderMobileBottomNav("history")}
   </main>;
 
   const renderMobileProcessing = () => {
@@ -1269,8 +1312,8 @@ export default function Home() {
       <div className="tts-player">
         <button className="play-button" onClick={playSpeech} aria-label={speaking ? (isMeloSynthesizing ? "取消生成" : "暂停播放") : "开始播放"}><AppIcon name={speaking ? "pause" : "play"} /></button>
         <div className="track-info"><div><strong>{isMeloSynthesizing ? "正在生成音频 · " : speaking ? "正在朗读 · " : "准备就绪 · "}{ttsProvider === "melotts" ? "MeloTTS" : "私有 TTS 未连接"}</strong><span>{isMeloSynthesizing ? "MeloTTS 正在合成音频，点击暂停可取消" : readerDocument.sections[0]?.title || readerDocument.title}</span></div><div className={`audio-progress${isMeloSynthesizing ? " is-synthesizing" : ""}`}><span style={{ width: `${speechProgress}%` }} /></div></div>
-        <div className="voice-select" aria-label="朗读方式"><span className="voice-label">朗读方式</span><span>{ttsProvider === "melotts" ? "MeloTTS 私有语音" : "私有服务未连接"}</span></div>
-        <span className="speed-pill">1.0×</span>
+        <label className="voice-select"><span className="voice-label">MeloTTS 音色</span><select value={selectedTtsVoice} onChange={(event) => selectMeloVoice(event.target.value)} disabled={ttsProvider !== "melotts" || !privateTtsVoices.length}>{privateTtsVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}</select></label>
+        <label className="speed-pill"><span className="voice-label">倍速</span><select value={ttsSpeed} onChange={(event) => selectMeloSpeed(Number(event.target.value))}>{MELOTTS_SPEED_OPTIONS.map((speed) => <option key={speed} value={speed}>{speed.toFixed(speed % 1 ? 2 : 1)}×</option>)}</select></label>
       </div>
       {notice && <button className="toast" onClick={() => setNotice("")} aria-label="关闭提示">{notice}<span>×</span></button>}
     </main>

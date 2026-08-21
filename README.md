@@ -54,6 +54,6 @@ npm test
 - 身份与隔离：主工作台必须注册/登录后才能使用；部署后的访问使用平台提供的 ChatGPT 身份，每个请求都在服务端注入 `tenant_id` 与 `user_id` 条件。本机注册和登录以中国大陆手机号为唯一账号标识，手机号归一化为 `+86` 格式并建立唯一索引；每个手机号获得独立的 user_id、tenant_id、对象存储路径与知识库查询条件。密码使用 PBKDF2 派生后保存、会话使用 HttpOnly cookie，便于验证多用户数据隔离；该机制只用于 localhost，不能用于生产认证。用户显式生成的分享链接保持只读公开访问，以支持转发。
 - 分享：资料所有者可生成带有效期与 H5 下载权限的链接，并可立即撤销。链接 token 只存哈希，不会写入数据库明文。
 - 检索：默认使用用户隔离的 D1 关键词分块检索；部署 [`services/knowledge_index`](services/knowledge_index) 并配置私有绑定后，自动切换到 FastEmbed + Qdrant 语义召回。
-- 私有 TTS：[`services/melotts`](services/melotts) 已接入官方 MeloTTS 中文模型。移动端默认使用 MeloTTS 的“中文自然女声”，暂不展示音色选择；私有服务不可用时自动回退浏览器语音。生产环境通过 `CUSTOMER_HTTP_TTS` 私有绑定接入，浏览器不会直接访问模型服务。
+- 私有 TTS：[`services/melotts`](services/melotts) 已接入官方 MeloTTS 中文模型。阅读页和分享页都从服务端动态加载可用音色，并支持 `0.5× / 0.75× / 1.0× / 1.25× / 1.5× / 2.0×`。切换音色或倍速时会从当前阅读位置继续；私有服务不可用时明确提示，不会伪装为浏览器语音。当前官方中文基础模型只包含“中文自然女声”；部署额外的兼容 MeloTTS 声学模型后会自动出现在选择器中。
 
 完整的生产数据与权限设计见 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md)，前后端联调以 [`public/openapi.yaml`](public/openapi.yaml) 为准。

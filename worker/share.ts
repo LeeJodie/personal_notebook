@@ -1,5 +1,6 @@
 import { ensureDocumentStore, getAuthenticatedActor, type DocumentEnv } from "./documents";
 import { isReaderDocument } from "./reader";
+import { listMeloTtsVoices, synthesizeMeloTts, type TtsEnv } from "./tts";
 
 interface ShareDocumentRow {
   id: string;
@@ -62,13 +63,13 @@ function serializeShare(row: ShareRow) {
   };
 }
 
-export async function handleShareRequest(request: Request, env: DocumentEnv): Promise<Response> {
+export async function handleShareRequest(request: Request, env: DocumentEnv & Pick<TtsEnv, "CUSTOMER_HTTP_TTS" | "LOCAL_TTS_URL">): Promise<Response> {
   const url = new URL(request.url);
-  const publicMatch = url.pathname.match(/^\/api\/shares\/([a-f0-9]{32,128})(?:\/artifacts\/(h5))?$/i);
+  const publicMatch = url.pathname.match(/^\/api\/shares\/([a-f0-9]{32,128})(?:\/artifacts\/(h5)|\/tts\/(voices|synthesize))?$/i);
   await ensureDocumentStore(env);
 
-  if (request.method === "GET" && publicMatch) {
-    const [, publicToken, artifact] = publicMatch;
+  if (publicMatch && (request.method === "GET" || (request.method === "POST" && publicMatch[3] === "synthesize"))) {
+    const [, publicToken, artifact, ttsAction] = publicMatch;
     const share = await env.DB.prepare("SELECT s.id, s.document_id, s.tenant_id, s.owner_user_id, s.token_hash, s.allow_download, s.expires_at, s.status, s.created_at, s.revoked_at, d.reader_json, d.h5_key, d.status AS document_status FROM document_shares s JOIN documents d ON d.id = s.document_id WHERE s.token_hash = ?")
       .bind(await tokenHash(publicToken)).first<(ShareRow & { reader_json: string | null; h5_key: string | null; document_status: string })>();
     if (!share || share.status !== "active" || share.document_status !== "ready") return error("分享链接不存在、已关闭或资料尚未就绪。", 404, "SHARE_NOT_FOUND");
@@ -79,6 +80,28 @@ export async function handleShareRequest(request: Request, env: DocumentEnv): Pr
     let reader: unknown;
     try { reader = share.reader_json ? JSON.parse(share.reader_json) : null; } catch { reader = null; }
     if (!isReaderDocument(reader)) return error("分享内容损坏，请联系资料所有者重新处理。", 500, "SHARE_CONTENT_INVALID");
+    // A public reader never receives a general-purpose TTS credential. The
+    // opaque share token is checked first, then narrowly authorizes MeloTTS
+    // only for this already-shared document.
+    const ttsHeaders = new Headers({ "x-tenant-id": share.tenant_id, "x-owner-user-id": share.owner_user_id });
+    if (ttsAction === "voices") {
+      if (request.method !== "GET") return error("不支持该分享朗读操作。", 405, "METHOD_NOT_ALLOWED");
+      try { return json(await listMeloTtsVoices(env, ttsHeaders)); }
+      catch (reason) { return error(reason instanceof Error ? reason.message : "私有 MeloTTS 服务不可用。", 503, "TTS_UNAVAILABLE"); }
+    }
+    if (ttsAction === "synthesize") {
+      if (request.method !== "POST") return error("不支持该分享朗读操作。", 405, "METHOD_NOT_ALLOWED");
+      const body = await request.json<{ text?: string; voice_id?: string; speed?: number }>().catch(() => null);
+      try {
+        return await synthesizeMeloTts(env, {
+          text: body?.text?.trim() || "",
+          voiceId: body?.voice_id?.trim() || "",
+          speed: Number(body?.speed) || 1,
+        }, ttsHeaders, request.signal);
+      } catch (reason) {
+        return error(reason instanceof Error ? reason.message : "MeloTTS 合成失败。", 503, "TTS_UNAVAILABLE");
+      }
+    }
     if (artifact === "h5") {
       if (!share.allow_download) return error("资料所有者未允许下载该 H5。", 403, "SHARE_DOWNLOAD_FORBIDDEN");
       if (!share.h5_key) return error("该资料的 H5 产物尚未生成。", 409, "ARTIFACT_NOT_READY");

@@ -68,7 +68,7 @@ const worker = {
       if (internalPath.includes("/shares")) return handleShareRequest(withPath(request, internalPath), env);
       return handleDocumentRequest(withPath(request, internalPath), env);
     }
-    if (/^\/v1\/public\/shares\/[a-f0-9]{32,128}(?:\/artifacts\/h5)?$/i.test(url.pathname)) {
+    if (/^\/v1\/public\/shares\/[a-f0-9]{32,128}(?:\/artifacts\/h5|\/tts\/(?:voices|synthesize))?$/i.test(url.pathname)) {
       return handleShareRequest(withPath(request, url.pathname.replace("/v1/public", "/api")), env);
     }
 
